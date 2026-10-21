@@ -17,10 +17,6 @@ pages = {
                 icon=":material/description:", url_path="reports"),
     ],
     "Manage": [
-        st.Page("pages/7_Factory_Assignments.py", title="Factory assignments",
-                icon=":material/factory:", url_path="factory-assignments"),
-        st.Page("pages/6_Packaging_Suppliers.py", title="Packaging suppliers",
-                icon=":material/inventory_2:", url_path="packaging-suppliers"),
         st.Page("pages/3_Tracker.py", title="Tracker data",
                 icon=":material/edit_note:", url_path="tracker"),
         st.Page("pages/4_Rates.py", title="Rates",

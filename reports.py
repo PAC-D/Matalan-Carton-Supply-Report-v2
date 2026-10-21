@@ -137,19 +137,15 @@ def _summary_block(con, key, fiscal_year):
     values are [qty, total amount, pacd, rebate], money rounded to cents so totals add up as printed.
     A % is "Mixed" when the quarter's rows don't share one rate, "-" when the type has no rows. None: no rows.
     """
-    totals = {kind: core.quarter_totals(con, kind, key, fiscal_year) for kind, _ in KINDS}
-    rates = {kind: core.quarter_rates(con, kind, key, fiscal_year) for kind, _ in KINDS}
-    quarters = sorted(set(totals["STD"]) | set(totals["CUS"]))
-    if not quarters:
+    summary = core.summary_rows(con, fiscal_year, supplier=key)
+    if not summary:
         return None
     lines, grand = [], [0, 0, 0, 0]
-    for q in quarters:
+    for q in sorted({row["quarter"] for row in summary}):
         kinds, q_total = [], [0, 0, 0, 0]
-        for kind, label in KINDS:
-            qty, amount, pacd, rebate = totals[kind].get(q, (0, 0, 0, 0))
-            values = [int(qty or 0)] + [round(v or 0, 2) for v in (amount, pacd, rebate)]
-            pcts = tuple("Mixed" if p is None else p for p in rates[kind][q]) if q in rates[kind] else ("-", "-")
-            kinds.append((label, pcts, values))
+        for row in (item for item in summary if item["quarter"] == q):
+            values = [row["cartons"], row["total_amount"], row["pacd"], row["matalan_rebate"]]
+            kinds.append((row["carton_type"], (row["pacd_rate"], row["rebate_rate"]), values))
             q_total = _add(q_total, values)
         lines.append((q, kinds, q_total))
         grand = _add(grand, q_total)

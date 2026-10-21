@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Document version** | 3.0 |
+| **Document version** | 3.2 |
 | **Product version** | 3.0.0 (in development) |
 | **Status** | In development |
-| **Last updated** | 2026-10-20 |
+| **Last updated** | 2026-10-22 |
 | **Owner** | PAC-D |
 | **Source** | `docs/superpowers/specs/2026-10-07-carton-tracker-design.md`, `docs/superpowers/specs/2026-10-08-ebiz-discrepancy-design.md` |
 
@@ -75,7 +75,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 
 | ID | Requirement |
 |---|---|
-| FR-DB-01 | On first start, the system shall create `carton.db` with the current schema (version 4) and seed the default rates. |
+| FR-DB-01 | On first start, the system shall create `carton.db` with the current schema (version 5) and seed the default rates. |
 | FR-DB-02 | On start, the system shall upgrade an older database schema without deleting existing tracker, rate, date-correction, or eBiz data where those tables exist. |
 | FR-DB-03 | The system shall store tracker data in `track_std` and `track_cus`, rates in `rates`, saved date corrections in `date_fixes`, and eBiz data in `ebiz`. |
 | FR-DB-04 | The system shall expose rate-aware views `v_std` and `v_cus` with PACD, Matalan rebate, fiscal year, and quarter calculated at query time. |
@@ -210,14 +210,13 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | FR-UI-08 | The launcher `run.bat` shall create/reuse `.venv`, install pinned requirements and start Streamlit from the project folder on localhost. |
 | FR-UI-09 | The system shall show actionable error messages for import errors, report errors, and missing data. |
 | FR-UI-10 | The website shall use both supplied logos and remain usable on desktop, laptop, tablet, and phone widths. |
-| FR-UI-11 | The Dashboard shall show shipment totals, supplier coverage, undated/unrated warnings, a packaging-supplier/month-filterable monthly carton chart with a dynamic Y-axis, and top supplier/factory tables when that data is available. |
+| FR-UI-11 | The Dashboard shall provide fiscal-year and packaging-supplier filters and show total cartons, Standard/Custom carton totals, quarterly packaging-supplier volumes, the detailed Summary rows, and Tracker-to-eBiz reconciliation. |
 | FR-UI-12 | The repository shall include a non-root Docker image, persistent SQLite volume, report volume, health check, and nginx reverse-proxy template. |
-| FR-UI-13 | Packaging Suppliers shall allow users to add and rename assignment suppliers and delete them only when no factory assignment references them. |
-| FR-UI-14 | Factory Assignments shall discover factories from tracker data, support multiple packaging suppliers per factory, filter and paginate the factory list, and import/export assignments in Excel. |
+| FR-UI-13 | Dashboard Summary values and the generated Summary Excel workbook shall use the same calculation source so their supplier, quarter, carton-type, rate and amount values remain consistent. |
 
 ## 6. Data requirements
 
-### 6.1 Database schema (version 4)
+### 6.1 Database schema (version 5)
 
 | Object | Purpose |
 |---|---|
@@ -226,10 +225,6 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | `rates` | `carton_type`, `effective_from`, `pacd_pct`, `matalan_pct`; primary key `(carton_type, effective_from)` |
 | `date_fixes` | Reviewed date corrections keyed by the row hash, with display fields and save time |
 | `ebiz` | Vendor export rows, optional columns, `so_1`, `so_2`, `vendor_key`, source file, and import time |
-| `app_meta` | One-time catalog-seeding state and future application metadata |
-| `packaging_suppliers` | Managed packaging-supplier names available for factory assignment |
-| `assignment_factories` | Factory catalog discovered from tracker `Factory Name` values |
-| `factory_assignments` | Priority-ordered many-to-many links between factories and packaging suppliers |
 | `v_std` / `v_cus` | Tracker rows joined to the applicable rate, with PACD, Matalan rebate, fiscal year, and quarter |
 
 ### 6.2 Calculation rules
@@ -273,7 +268,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | NFR-08 | Excel reports shall be print-ready (page setup, margins, headers/footers, repeated titles) and PDFs shall include page numbering and generation timestamps. |
 | NFR-09 | The implementation shall use SQLite from the Python standard library and shall not require a database server or ORM. |
 | NFR-10 | Runtime and test dependencies shall be pinned in `requirements.txt`. |
-| NFR-11 | The automated test suite shall cover database logic, tracker import, date review, rates, report generation, eBiz import, reconciliation, assignment management, and UI smoke tests. |
+| NFR-11 | The automated test suite shall cover database logic, tracker import, date review, rates, live Summary calculations, report generation, eBiz import, reconciliation, tracker editing, and UI smoke tests. |
 | NFR-12 | The application shall run on Windows 10/11 with Python 3.14 and the pinned dependencies. |
 | NFR-13 | File and folder creation shall not overwrite unrelated files; only same-named generated reports are replaced. |
 | NFR-14 | The project shall be distributed under the Mozilla Public License 2.0. |
@@ -296,12 +291,11 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | AC-09 | Reconciliation covers SO_1 match, SO_2 fallback, eBiz-only, Not in eBiz, tracker > eBiz, tracker < eBiz, Match, no-SO# rows, and undated tracker rows. |
 | AC-10 | The Discrepancy Report contains every section title and the empty-section message; the Cross Reference values and totals match the reconciliation structure. |
 | AC-11 | `python -m pytest check.py -q` passes all automated checks. |
-| AC-12 | The app starts on localhost and its Dashboard, Reports, Factory Assignments, Packaging Suppliers, Tracker, Rates, and Import pages load without errors. |
+| AC-12 | The app starts on localhost and its Dashboard, Reports, Tracker, Rates, and Import pages load without errors. |
 | AC-13 | A user can edit a PO, date and quantity in Tracker data; valid changes persist and an invalid row rolls back the complete save. |
 | AC-14 | The running app returns HTTP 200 from the Streamlit health endpoint. |
-| AC-15 | Upgrading a version-3 database creates the assignment tables without deleting tracker, rate, date-correction, or eBiz data. |
-| AC-16 | A packaging supplier assigned to any factory cannot be deleted until those assignments are removed. |
-| AC-17 | Exported factory assignments can be cleared and imported again with the same ordered supplier selections. |
+| AC-15 | Upgrading a version-4 database removes obsolete assignment-management tables without deleting tracker, rate, date-correction, or eBiz data. |
+| AC-16 | Dashboard Summary rows equal the supplier/quarter/carton-type values used by the generated Summary workbook. |
 
 ## 9. Assumptions and constraints
 
@@ -321,17 +315,18 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | Tracker import | `core.py` | `test_demo_import_counts_and_totals`, `test_reimport_replaces_only_overlapping_supplier_months`, `test_failed_batch_leaves_database_unchanged` |
 | Date review | `core.py`, `pages/5_Import.py` | `test_dates_that_look_right_are_not_listed`, `test_reviewed_dates_are_imported_and_reused_next_time`, `test_forgotten_correction_is_checked_again` |
 | Tracker editing | `core.py`, `pages/3_Tracker.py` | `test_tracker_rows_can_be_manually_edited`, `test_invalid_tracker_edit_rolls_back` |
+| Live Summary dashboard | `core.py`, `pages/1_Dashboard.py`, `reports.py` | `test_live_summary_rows_match_report_totals`, `test_cross_reference_overview_drives_live_dashboard`, `test_app_smoke` |
 | Tracker reports | `reports.py` | `test_summary_xlsx`, `test_full_tracker_pdf_pacd`, `test_raw_data_xlsx`, `test_shipment_tracking_xlsx`, `test_save_all` |
 | eBiz import | `core.py`, `pages/5_Import.py` | `test_read_ebiz_splits_order_numbers`, `test_ebiz_upload_replaces_all_ebiz_data`, `test_app_replaces_ebiz_data` |
 | Reconciliation | `core.py` | `test_cross_reference` |
 | eBiz reports | `reports.py` | `test_discrepancy_pdf`, `test_cross_reference_xlsx`, `test_build_all_adds_discrepancy_files_for_suppliers_with_ebiz` |
-| Assignment management | `core.py`, `pages/6_Packaging_Suppliers.py`, `pages/7_Factory_Assignments.py` | `test_schema_v4_upgrade_adds_assignment_tables_without_losing_tracker_data`, `test_packaging_supplier_crud_factory_assignments_and_excel_roundtrip`, `test_assignment_management_pages_load_with_tracker_catalog` |
 | Website UI | `app.py`, `web_ui.py`, `pages/` | `test_app_smoke`, `test_app_builds_reports_for_every_selected_supplier`, `test_app_no_data_for_selection` |
 
 ## 11. Document history
 
 | Version | Date | Change |
 |---|---|---|
+| 3.2 | 2026-10-22 | Refocused the website on the editable Tracker and a live dashboard matching the generated Summary and reconciliation reports; removed assignment management |
 | 3.1 | 2026-10-21 | Packaging-supplier catalog and factory-assignment management requirements |
 | 3.0 | 2026-10-20 | Responsive hosted website, dashboard, multipage navigation, editable tracker and Docker deployment requirements |
 | 2.0 | 2026-10-19 | Requirements for the released v2.0.0, including eBiz reconciliation, reports, and acceptance criteria |

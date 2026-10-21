@@ -13,10 +13,8 @@ for hosting.
 
 | Section | Page | Purpose |
 |---|---|---|
-| Overview | **Dashboard** | Shipment KPIs, filterable monthly carton volumes, and top supplier/factory rankings |
+| Overview | **Dashboard** | Live Summary-report totals, quarterly supplier volumes, STD/CUS breakdown, and Tracker-to-eBiz reconciliation |
 | Reports | **Build reports** | Supplier/fiscal-period filters and ZIP or individual report downloads |
-| Manage | **Factory assignments** | Assign one or more managed packaging suppliers to each tracker factory |
-| Manage | **Packaging suppliers** | Add, rename and safely delete packaging suppliers used by assignments |
 | Manage | **Tracker data** | Edit imported `TRACK_STD` and `TRACK_CUS` rows, including dates, POs, quantities and prices |
 | Manage | **Rates** | Maintain date-effective PACD and Matalan rebate percentages |
 | Manage | **Data import** | Import tracker workbooks, review suspicious dates and replace eBiz vendor data |
@@ -31,9 +29,8 @@ appears in navigation and the Matalan wordmark appears in the top bar.
 - Provides a database-backed tracker editor after import. Dates accept
   `YYYY-MM-DD` or `DD/MM/YYYY`; every edited row is validated and saved in one
   transaction.
-- Seeds a managed supplier/factory catalog from tracker data, supports
-  factory-to-packaging-supplier assignments, and imports or exports those
-  assignments as Excel.
+- Shows a live dashboard calculated from the same supplier, quarter, rate and
+  carton-type rows used to generate the Summary Excel workbook.
 - Maintains date-effective PACD and Matalan rebate rates.
 - Imports all current eBiz vendor exports as one atomic replacement.
 - Creates Summary, Full Tracker, Raw Data, Shipment Tracking, Discrepancy and
@@ -139,19 +136,6 @@ quarter-based reports.
 Row IDs and source metadata are read-only. Rate, rebate, PACD, fiscal year and
 quarter are calculated fields and update automatically after edits.
 
-### Manage factory assignments
-
-1. Open **Packaging suppliers** to add or rename the suppliers available for
-   assignment. A supplier with active factory assignments cannot be deleted.
-2. Open **Factory assignments** and select one or more packaging suppliers for
-   each factory, then select **Save**.
-3. Use the factory, packaging-supplier and assignment-status filters for large
-   lists. The Excel section can export all assignments or apply a reviewed
-   workbook atomically.
-
-Factories are discovered from imported tracker rows. Assignment changes do not
-rewrite historical shipment rows or alter previously generated report inputs.
-
 ### Import eBiz data
 
 Upload one export per vendor under **Data import**. Replacement deletes all
@@ -174,10 +158,9 @@ Back up the database while the app is stopped, or use SQLite's online backup
 API. `carton.db`, `.env`, `data/` and `Reports/` are excluded from Git.
 
 The SQLite file contains parsed tracker rows, parsed eBiz rows, saved date
-corrections, rebate rates, managed packaging suppliers and factory assignments.
-It records source workbook names and import times, but it does not embed copies
-of the original Excel workbooks. Keep those workbooks separately if the source
-files must also be retained.
+corrections and rebate rates. It records source workbook names and import times,
+but it does not embed copies of the original Excel workbooks. Keep those
+workbooks separately if the source files must also be retained.
 
 For multiple app containers or sustained concurrent editing, migrate the
 persistence layer to PostgreSQL before scaling.
@@ -195,7 +178,7 @@ manual tracker editing, report generation and page smoke tests.
 
 ```text
 app.py              Website navigation
-pages/              Dashboard, reports, assignment management, tracker, rates and imports
+pages/              Dashboard, reports, tracker editor, rates and imports
 web_ui.py           Responsive PACD/Matalan theme and shared page chrome
 core.py             SQLite schema, imports, edits, queries and reconciliation
 reports.py          Excel/PDF report builders

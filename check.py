@@ -109,57 +109,26 @@ def test_connect_does_not_rewrite_a_current_schema(tmp_path, monkeypatch):
     core.connect(tmp_path / "t.db")
 
 
-def test_schema_v4_upgrade_adds_assignment_tables_without_losing_tracker_data(tmp_path):
+def test_schema_v5_upgrade_removes_assignment_tables_without_losing_report_data(tmp_path):
     path = tmp_path / "t.db"
     con = core.connect(path)
     insert(con, "STD", factory_name="Factory A", packaging_supplier="Pack A",
            supplier_key="PACK", carton_qty=10)
     with con:
-        con.execute("DROP TABLE factory_assignments")
-        con.execute("DROP TABLE assignment_factories")
-        con.execute("DROP TABLE packaging_suppliers")
-        con.execute("DROP TABLE app_meta")
-        con.execute("PRAGMA user_version = 3")
+        con.execute("CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("CREATE TABLE packaging_suppliers (id INTEGER PRIMARY KEY, name TEXT)")
+        con.execute("CREATE TABLE assignment_factories (id INTEGER PRIMARY KEY, name TEXT)")
+        con.execute("CREATE TABLE factory_assignments (factory_id INTEGER, packaging_supplier_id INTEGER)")
+        con.execute("PRAGMA user_version = 4")
     con.close()
 
     con = core.connect(path)
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 5
     assert con.execute("SELECT COUNT(*) FROM track_std").fetchone()[0] == 1
-    assert [row["name"] for row in core.list_packaging_suppliers(con)] == ["Pack A"]
-    assert [row["name"] for row in core.list_assignment_factories(con)] == ["Factory A"]
-
-
-def test_packaging_supplier_crud_factory_assignments_and_excel_roundtrip(tmp_path):
-    con = core.connect(tmp_path / "t.db")
-    insert(con, "STD", factory_name="Factory A", packaging_supplier="Pack A",
-           supplier_key="PACK", carton_qty=10)
-    insert(con, "CUS", factory_name="Factory B", packaging_supplier="Pack A",
-           supplier_key="PACK", carton_qty=20)
-    core.sync_assignment_catalog(con)
-    suppliers = core.list_packaging_suppliers(con)
-    factories = core.list_assignment_factories(con)
-    assert [row["name"] for row in suppliers] == ["Pack A"]
-    assert [row["name"] for row in factories] == ["Factory A", "Factory B"]
-
-    second_id = core.add_packaging_supplier(con, "  Pack   B  ")
-    with pytest.raises(ValueError, match="already exists"):
-        core.add_packaging_supplier(con, "pack b")
-    core.rename_packaging_supplier(con, second_id, "Pack B Limited")
-    factory_id = factories[0]["id"]
-    core.set_factory_assignments(con, factory_id, [suppliers[0]["id"], second_id])
-    assigned = core.list_assignment_factories(con)[0]
-    assert assigned["assigned_names"] == ["Pack A", "Pack B Limited"]
-    with pytest.raises(ValueError, match="can't be deleted"):
-        core.delete_packaging_supplier(con, second_id)
-
-    workbook = core.export_factory_assignments(con)
-    core.set_factory_assignments(con, factory_id, [])
-    assert core.import_factory_assignments(con, workbook) == 2
-    assert core.list_assignment_factories(con)[0]["assigned_names"] == [
-        "Pack A", "Pack B Limited"]
-    core.set_factory_assignments(con, factory_id, [])
-    core.delete_packaging_supplier(con, second_id)
-    assert [row["name"] for row in core.list_packaging_suppliers(con)] == ["Pack A"]
+    tables = {row[0] for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert not {"app_meta", "packaging_suppliers", "assignment_factories",
+                "factory_assignments"} & tables
 
 @pytest.mark.parametrize("name, key", [
     ("M&U  Packaging Ltd.", "M&U"),
@@ -599,24 +568,20 @@ def test_invalid_tracker_edit_rolls_back(demo_con):
     assert after == before
 
 
-def test_dashboard_summary_includes_quality_counts(tmp_path):
+def test_live_summary_rows_match_report_totals(tmp_path):
     con = core.connect(tmp_path / "t.db")
     insert(con, "STD", shipment_date="2026-08-01", packaging_supplier="Pack Ltd",
            supplier_key="PACK", supplier_name="Supplier A", factory_name="Factory A",
-           carton_qty=10)
-    insert(con, "CUS", shipment_date=None, packaging_supplier="Pack Ltd",
+           carton_qty=10, unit_price=2.0, total_amount=20.0)
+    insert(con, "CUS", shipment_date="2026-08-02", packaging_supplier="Pack Ltd",
            supplier_key="PACK", supplier_name="Supplier B", factory_name="Factory B",
-           carton_qty=5)
-    stats = core.dashboard_stats(con)
-    assert (stats["rows"], stats["cartons"], stats["suppliers"], stats["undated"]) == (1, 10, 1, 1)
-    assert core.monthly_cartons(con) == [
-        {"month": "2026-08", "supplier_key": "PACK", "cartons": 10}]
-    assert core.top_tracker_entities(con, "supplier_name") == [
-        {"name": "Supplier A", "cartons": 10}]
-    assert core.top_tracker_entities(con, "factory_name") == [
-        {"name": "Factory A", "cartons": 10}]
-    with pytest.raises(ValueError, match="Unsupported"):
-        core.top_tracker_entities(con, "packaging_supplier")
+           carton_qty=5, unit_price=4.0, total_amount=20.0)
+    rows = core.summary_rows(con, 2026)
+    assert [(row["carton_type"], row["cartons"], row["total_amount"])
+            for row in rows] == [("Standard", 10, 20.0), ("Custom", 5, 20.0)]
+    assert all(row["quarter_label"] == "Q3 (Jul-Aug)" for row in rows)
+    assert rows[0]["pacd_rate"] == 0.04 and rows[1]["pacd_rate"] == 0.075
+    assert core.summary_rows(con, 2027) == []
 
 
 def test_rate_headers():
@@ -790,32 +755,14 @@ def test_app_smoke(tmp_path, monkeypatch):
     core.save(core.connect(db), core.read_workbook(DEMO), DEMO.name)
     at = AppTest.from_file(str(HERE / "pages" / "1_Dashboard.py"), default_timeout=30).run()
     assert not at.exception
-    assert at.subheader[0].value == "Monthly cartons"
-    assert [item.value for item in at.subheader[1:]] == ["Top suppliers", "Top factories"]
+    assert [item.value for item in at.subheader] == [
+        "Quarterly carton sales by packaging supplier",
+        "Standard and custom cartons",
+        "Live Summary sheet",
+        "Tracker and eBiz cross-reference",
+    ]
+    assert at.selectbox[0].label == "Fiscal year"
     assert at.multiselect[0].label == "Packaging suppliers"
-
-
-def test_assignment_management_pages_load_with_tracker_catalog(tmp_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
-    db = tmp_path / "assignments.db"
-    monkeypatch.setenv("CARTON_DB", str(db))
-    con = core.connect(db)
-    insert(con, "STD", shipment_date="2026-08-01", factory_name="Factory A",
-           packaging_supplier="Pack A", supplier_key="PACK", carton_qty=10)
-    core.sync_assignment_catalog(con)
-
-    suppliers = AppTest.from_file(
-        str(HERE / "pages" / "6_Packaging_Suppliers.py"), default_timeout=30).run()
-    assert not suppliers.exception
-    assert suppliers.subheader[0].value == "Add packaging supplier"
-    assert suppliers.subheader[1].value == "Suppliers"
-
-    assignments = AppTest.from_file(
-        str(HERE / "pages" / "7_Factory_Assignments.py"), default_timeout=30).run()
-    assert not assignments.exception
-    assert [item.label for item in assignments.selectbox[:3]] == [
-        "Factory", "Packaging supplier", "Status"]
-    assert assignments.multiselect[0].label == "Packaging suppliers"
 
 
 def test_app_builds_reports_for_every_selected_supplier(tmp_path, monkeypatch):
@@ -997,6 +944,20 @@ def test_cross_reference(xref_con):
     assert core.cross_reference(xref_con, "NOBODY") == {"orders": [], "rows": {"STD": [], "CUS": []},
                                                         "ebiz_only": []}
     assert sorted(["12", None, "AB", "3", "²"], key=core.so_order) == ["3", "12", "AB", "²", None]  # "²".isdigit()
+
+
+def test_cross_reference_overview_drives_live_dashboard(xref_con):
+    rows = core.cross_reference_overview(xref_con)
+    pack = next(row for row in rows if row["supplier_key"] == "PACK")
+    assert pack == {
+        "supplier_key": "PACK",
+        "packaging_supplier": "Pack A Ltd.",
+        "tracker_orders": 4,
+        "matches": 1,
+        "not_in_ebiz": 1,
+        "quantity_mismatches": 2,
+        "ebiz_only": 1,
+    }
 
 
 DISCREPANCY_TITLES = ("Tracker Orders Not Found in eBiz", "Quantity Mismatch (Tracker > eBiz)",

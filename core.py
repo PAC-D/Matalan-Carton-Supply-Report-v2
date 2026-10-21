@@ -12,7 +12,7 @@ from pathlib import Path
 import openpyxl
 
 DEFAULT_DB = Path(__file__).with_name("carton.db")
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 TABLES = {"STD": "track_std", "CUS": "track_cus"}
 SHEETS = {"STD": "TRACK_STD", "CUS": "TRACK_CUS"}
 
@@ -125,27 +125,6 @@ def _schema():
     ebiz_cols = ",\n  ".join(f"{c} {'REAL' if c in EBIZ_REAL else 'TEXT'}" for c in EBIZ_COLUMNS)
     sql.append(f"CREATE TABLE IF NOT EXISTS ebiz (\n  id INTEGER PRIMARY KEY,\n  {ebiz_cols},\n"
                f"  source_file TEXT,\n  imported_at TEXT\n);")
-    sql.append("""CREATE TABLE IF NOT EXISTS app_meta (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);""")
-    sql.append("""CREATE TABLE IF NOT EXISTS packaging_suppliers (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-  created_at TEXT NOT NULL
-);""")
-    sql.append("""CREATE TABLE IF NOT EXISTS assignment_factories (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-  created_at TEXT NOT NULL
-);""")
-    sql.append("""CREATE TABLE IF NOT EXISTS factory_assignments (
-  factory_id INTEGER NOT NULL REFERENCES assignment_factories(id) ON DELETE CASCADE,
-  packaging_supplier_id INTEGER NOT NULL REFERENCES packaging_suppliers(id) ON DELETE RESTRICT,
-  priority INTEGER NOT NULL,
-  PRIMARY KEY (factory_id, packaging_supplier_id),
-  UNIQUE (factory_id, priority)
-);""")
     for kind, table in TABLES.items():
         view = f"v_{kind.lower()}"
         sql.append(f"DROP VIEW IF EXISTS {view};")
@@ -163,11 +142,16 @@ def connect(path=None):
     con.execute("PRAGMA foreign_keys = ON")
     if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
         con.executescript(_schema())
+        con.executescript("""
+DROP TABLE IF EXISTS factory_assignments;
+DROP TABLE IF EXISTS assignment_factories;
+DROP TABLE IF EXISTS packaging_suppliers;
+DROP TABLE IF EXISTS app_meta;
+""")
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     if not con.execute("SELECT 1 FROM rates LIMIT 1").fetchone():
         with con:
             con.executemany("INSERT INTO rates VALUES (?, ?, ?, ?)", SEED_RATES)
-    sync_assignment_catalog(con)
     return con
 
 
@@ -875,246 +859,63 @@ def update_tracker_rows(con, kind, edited):
     return len(prepared)
 
 
-def dashboard_stats(con):
-    """Small, set-oriented summary used by the website dashboard."""
-    src, params = _dated()
-    row = con.execute(
-        f"SELECT COUNT(*), COALESCE(SUM(carton_qty), 0), "
-        f"COUNT(DISTINCT supplier_key), MIN(shipment_date), MAX(shipment_date), "
-        f"SUM(pacd_pct IS NULL) FROM {src}", params).fetchone()
-    undated = sum(con.execute(
-        f"SELECT COUNT(*) FROM {table} WHERE shipment_date IS NULL").fetchone()[0]
-        for table in TABLES.values())
-    return {"rows": row[0], "cartons": row[1], "suppliers": row[2],
-            "first_date": row[3], "last_date": row[4],
-            "unrated": row[5], "undated": undated}
+def summary_rows(con, fiscal_year, supplier=None):
+    """The generated Summary workbook's supplier/quarter/carton-type rows.
 
-
-def monthly_cartons(con):
-    """Carton quantities by shipment month and packaging supplier."""
-    src, params = _dated()
-    return [dict(r) for r in con.execute(
-        f"SELECT substr(shipment_date, 1, 7) AS month, supplier_key, "
-        f"SUM(COALESCE(carton_qty, 0)) AS cartons FROM {src} "
-        "GROUP BY month, supplier_key ORDER BY month, supplier_key", params)]
-
-
-def top_tracker_entities(con, column, limit=10):
-    """Top garment suppliers or factories by cartons in dated tracker rows."""
-    if column not in {"supplier_name", "factory_name"}:
-        raise ValueError("Unsupported tracker ranking column")
-    src, params = _dated()
-    return [dict(r) for r in con.execute(
-        f"SELECT {column} AS name, SUM(COALESCE(carton_qty, 0)) AS cartons "
-        f"FROM {src} WHERE {column} IS NOT NULL AND TRIM({column}) <> '' "
-        f"GROUP BY {column} ORDER BY cartons DESC, name LIMIT ?",
-        [*params, int(limit)])]
-
-
-def _entity_name(value):
-    """Trim and collapse whitespace in a managed supplier/factory name."""
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
-def sync_assignment_catalog(con):
-    """Discover tracker factories and seed packaging suppliers once.
-
-    Factories continue to be discovered as tracker data changes. Packaging
-    suppliers are only seeded once so a supplier deleted by an administrator
-    is not recreated from historical tracker rows.
+    Values and rate labels deliberately follow the same rules as the workbook,
+    making this the shared source for both the live dashboard and Excel output.
     """
-    raw = " UNION ALL ".join(
-        f"SELECT factory_name, packaging_supplier, supplier_key FROM {table}"
-        for table in TABLES.values())
-    rows = con.execute(
-        f"SELECT factory_name, packaging_supplier, supplier_key FROM ({raw}) "
-        "WHERE factory_name IS NOT NULL OR packaging_supplier IS NOT NULL").fetchall()
-    now = datetime.now().isoformat(timespec="seconds")
-    factories = sorted({_entity_name(r["factory_name"]) for r in rows
-                        if _entity_name(r["factory_name"])}, key=str.casefold)
-    with con:
-        con.executemany(
-            "INSERT OR IGNORE INTO assignment_factories (name, created_at) VALUES (?, ?)",
-            [(name, now) for name in factories])
-        seeded = con.execute(
-            "SELECT value FROM app_meta WHERE key = 'assignment_suppliers_seeded'").fetchone()
-        if seeded is None:
-            counts = {}
-            for row in rows:
-                name = _entity_name(row["packaging_supplier"])
-                key = row["supplier_key"] or supplier_key(name)
-                if name and key:
-                    counts[(key, name)] = counts.get((key, name), 0) + 1
-            chosen = {}
-            for (key, name), count in counts.items():
-                current = chosen.get(key)
-                if current is None or (-count, name.casefold()) < (-current[0], current[1].casefold()):
-                    chosen[key] = (count, name)
-            if chosen:
-                con.executemany(
-                    "INSERT OR IGNORE INTO packaging_suppliers (name, created_at) VALUES (?, ?)",
-                    [(item[1], now) for item in sorted(chosen.values(), key=lambda x: x[1].casefold())])
-                con.execute(
-                    "INSERT INTO app_meta (key, value) VALUES ('assignment_suppliers_seeded', '1')")
+    keys = [supplier] if supplier is not None else suppliers(con)
+    out = []
+    for key in keys:
+        totals = {kind: quarter_totals(con, kind, key, fiscal_year) for kind in TABLES}
+        rates = {kind: quarter_rates(con, kind, key, fiscal_year) for kind in TABLES}
+        quarters = sorted(set(totals["STD"]) | set(totals["CUS"]))
+        for quarter in quarters:
+            for kind, label in (("STD", "Standard"), ("CUS", "Custom")):
+                qty, amount, pacd, rebate = totals[kind].get(quarter, (0, 0, 0, 0))
+                if quarter not in rates[kind]:
+                    pacd_rate, rebate_rate = "-", "-"
+                else:
+                    pacd_rate, rebate_rate = (
+                        "Mixed" if value is None else value
+                        for value in rates[kind][quarter])
+                out.append({
+                    "supplier_key": key,
+                    "packaging_supplier": supplier_name(con, key),
+                    "fiscal_year": int(fiscal_year),
+                    "quarter": quarter,
+                    "quarter_label": f"Q{quarter} ({QUARTER_MONTHS[quarter]})",
+                    "carton_type": label,
+                    "pacd_rate": pacd_rate,
+                    "rebate_rate": rebate_rate,
+                    "cartons": int(qty or 0),
+                    "total_amount": round(amount or 0, 2),
+                    "pacd": round(pacd or 0, 2),
+                    "matalan_rebate": round(rebate or 0, 2),
+                })
+    return out
 
 
-def list_packaging_suppliers(con):
-    """Managed packaging suppliers and their factory assignment counts."""
-    return [dict(row) for row in con.execute(
-        "SELECT ps.id, ps.name, COUNT(fa.factory_id) AS assignment_count "
-        "FROM packaging_suppliers ps LEFT JOIN factory_assignments fa "
-        "ON fa.packaging_supplier_id = ps.id "
-        "GROUP BY ps.id, ps.name ORDER BY ps.name COLLATE NOCASE")]
-
-
-def add_packaging_supplier(con, name):
-    name = _entity_name(name)
-    if not name:
-        raise ValueError("Enter a packaging supplier name.")
-    try:
-        with con:
-            cur = con.execute(
-                "INSERT INTO packaging_suppliers (name, created_at) VALUES (?, ?)",
-                (name, datetime.now().isoformat(timespec="seconds")))
-            con.execute(
-                "INSERT OR IGNORE INTO app_meta (key, value) "
-                "VALUES ('assignment_suppliers_seeded', '1')")
-    except sqlite3.IntegrityError:
-        raise ValueError(f"A packaging supplier named {name} already exists.") from None
-    return cur.lastrowid
-
-
-def rename_packaging_supplier(con, supplier_id, name):
-    name = _entity_name(name)
-    if not name:
-        raise ValueError("Enter a packaging supplier name.")
-    if con.execute("SELECT 1 FROM packaging_suppliers WHERE id = ?", (supplier_id,)).fetchone() is None:
-        raise ValueError("Packaging supplier not found.")
-    try:
-        with con:
-            con.execute("UPDATE packaging_suppliers SET name = ? WHERE id = ?", (name, supplier_id))
-    except sqlite3.IntegrityError:
-        raise ValueError(f"A packaging supplier named {name} already exists.") from None
-
-
-def delete_packaging_supplier(con, supplier_id):
-    row = con.execute(
-        "SELECT ps.name, COUNT(fa.factory_id) AS factory_count "
-        "FROM packaging_suppliers ps LEFT JOIN factory_assignments fa "
-        "ON fa.packaging_supplier_id = ps.id WHERE ps.id = ? GROUP BY ps.id",
-        (supplier_id,)).fetchone()
-    if row is None:
-        raise ValueError("Packaging supplier not found.")
-    if row["factory_count"]:
-        raise ValueError(
-            f"{row['name']} can't be deleted while assigned to "
-            f"{row['factory_count']:,} factories. Remove those assignments first.")
-    with con:
-        con.execute("DELETE FROM packaging_suppliers WHERE id = ?", (supplier_id,))
-
-
-def list_assignment_factories(con):
-    """Tracker-discovered factories with priority-ordered assignments."""
-    factories = [dict(row) for row in con.execute(
-        "SELECT id, name FROM assignment_factories ORDER BY name COLLATE NOCASE")]
-    assigned = {}
-    for row in con.execute(
-            "SELECT fa.factory_id, ps.id, ps.name FROM factory_assignments fa "
-            "JOIN packaging_suppliers ps ON ps.id = fa.packaging_supplier_id "
-            "ORDER BY fa.factory_id, fa.priority"):
-        assigned.setdefault(row["factory_id"], []).append((row["id"], row["name"]))
-    for factory in factories:
-        pairs = assigned.get(factory["id"], [])
-        factory["assigned_ids"] = [item[0] for item in pairs]
-        factory["assigned_names"] = [item[1] for item in pairs]
-    return factories
-
-
-def set_factory_assignments(con, factory_id, supplier_ids):
-    """Replace one factory's supplier set, preserving selection order."""
-    supplier_ids = list(dict.fromkeys(int(value) for value in supplier_ids))
-    if con.execute("SELECT 1 FROM assignment_factories WHERE id = ?", (factory_id,)).fetchone() is None:
-        raise ValueError("Factory not found.")
-    if supplier_ids:
-        marks = ", ".join("?" * len(supplier_ids))
-        found = {row[0] for row in con.execute(
-            f"SELECT id FROM packaging_suppliers WHERE id IN ({marks})", supplier_ids)}
-        if found != set(supplier_ids):
-            raise ValueError("One or more packaging suppliers no longer exist.")
-    with con:
-        con.execute("DELETE FROM factory_assignments WHERE factory_id = ?", (factory_id,))
-        con.executemany(
-            "INSERT INTO factory_assignments "
-            "(factory_id, packaging_supplier_id, priority) VALUES (?, ?, ?)",
-            [(factory_id, supplier_id, priority)
-             for priority, supplier_id in enumerate(supplier_ids, start=1)])
-
-
-def export_factory_assignments(con):
-    """Current factory assignments as an import-compatible XLSX workbook."""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Factory Assignments"
-    ws.append(["Factory", "Packaging Suppliers"])
-    for factory in list_assignment_factories(con):
-        ws.append([factory["name"], " | ".join(factory["assigned_names"])])
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-    ws.column_dimensions["A"].width = 42
-    ws.column_dimensions["B"].width = 68
-    out = BytesIO()
-    wb.save(out)
-    return out.getvalue()
-
-
-def import_factory_assignments(con, content):
-    """Apply an XLSX exported by export_factory_assignments atomically."""
-    try:
-        ws = openpyxl.load_workbook(BytesIO(content), data_only=True).active
-    except Exception as exc:
-        raise ValueError(f"Can't open the assignments workbook: {exc}") from exc
-    try:
-        header_values = next(ws.iter_rows(values_only=True))
-    except StopIteration:
-        raise ValueError("Assignments workbook is empty.") from None
-    headers = {_norm(value): index for index, value in enumerate(header_values)}
-    factory_col = headers.get("factory")
-    suppliers_col = headers.get("packaging suppliers")
-    if factory_col is None or suppliers_col is None:
-        raise ValueError("Assignments workbook requires Factory and Packaging Suppliers columns.")
-    factories = {row["name"].casefold(): row for row in list_assignment_factories(con)}
-    suppliers = {row["name"].casefold(): row for row in list_packaging_suppliers(con)}
-    prepared, errors, seen = [], [], set()
-    for number, values in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        factory_name = _entity_name(values[factory_col] if factory_col < len(values) else None)
-        raw_suppliers = _entity_name(values[suppliers_col] if suppliers_col < len(values) else None)
-        if not factory_name and not raw_suppliers:
-            continue
-        factory = factories.get(factory_name.casefold())
-        if factory is None:
-            errors.append(f"Row {number}: unknown factory {factory_name or '(blank)' }.")
-            continue
-        if factory["id"] in seen:
-            errors.append(f"Row {number}: factory {factory_name} appears more than once.")
-            continue
-        seen.add(factory["id"])
-        names = [_entity_name(value) for value in re.split(r"\s*[|;,]\s*", raw_suppliers) if _entity_name(value)]
-        missing = [name for name in names if name.casefold() not in suppliers]
-        if missing:
-            errors.append(f"Row {number}: unknown packaging supplier(s): {', '.join(missing)}.")
-            continue
-        prepared.append((factory["id"], [suppliers[name.casefold()]["id"] for name in names]))
-    if errors:
-        raise ValueError("\n".join(errors))
-    with con:
-        for factory_id, supplier_ids in prepared:
-            con.execute("DELETE FROM factory_assignments WHERE factory_id = ?", (factory_id,))
-            con.executemany(
-                "INSERT INTO factory_assignments "
-                "(factory_id, packaging_supplier_id, priority) VALUES (?, ?, ?)",
-                [(factory_id, supplier_id, priority)
-                 for priority, supplier_id in enumerate(supplier_ids, start=1)])
-    return len(prepared)
+def cross_reference_overview(con):
+    """One live Tracker-vs-eBiz status summary per packaging supplier."""
+    keys = sorted(set(tracker_suppliers(con)) | set(ebiz_vendors(con)))
+    overview = []
+    for key in keys:
+        data = cross_reference(con, key)
+        statuses = {label: 0 for label in ("Match", "Not in eBiz", "Tracker > eBiz", "Tracker < eBiz")}
+        for order in data["orders"]:
+            statuses[order["status"]] += 1
+        overview.append({
+            "supplier_key": key,
+            "packaging_supplier": supplier_name(con, key),
+            "tracker_orders": len(data["orders"]),
+            "matches": statuses["Match"],
+            "not_in_ebiz": statuses["Not in eBiz"],
+            "quantity_mismatches": statuses["Tracker > eBiz"] + statuses["Tracker < eBiz"],
+            "ebiz_only": len(data["ebiz_only"]),
+        })
+    return overview
 
 
 def suppliers(con):

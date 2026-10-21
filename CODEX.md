@@ -10,13 +10,11 @@
 
 ## Pages
 
-1. Dashboard — shipment KPIs, data-quality warnings and monthly volumes.
+1. Dashboard — live Summary-report KPIs, quarterly supplier totals, STD/CUS breakdown and Tracker-to-eBiz reconciliation.
 2. Build reports — fiscal year/quarter filters and ZIP/single-file downloads.
-3. Factory assignments — filtered, paginated factory-to-packaging-supplier management and Excel exchange.
-4. Packaging suppliers — assignment supplier add, rename and guarded delete.
-5. Tracker data — editable `TRACK_STD` and `TRACK_CUS` database rows.
-6. Rates — date-effective PACD and Matalan percentages.
-7. Data import — tracker date review and all-vendor eBiz replacement.
+3. Tracker data — editable `TRACK_STD` and `TRACK_CUS` database rows.
+4. Rates — date-effective PACD and Matalan percentages.
+5. Data import — tracker date review and all-vendor eBiz replacement.
 
 ## Important decisions
 
@@ -28,9 +26,8 @@
   to PostgreSQL and add application authentication/roles.
 - Tracker edits are transactional. Dates accept `YYYY-MM-DD` and
   `DD/MM/YYYY`; report-only fields are recalculated and cannot be edited.
-- Assignment catalogs are stored separately from historical tracker rows.
-  Factories are discovered from tracker data; packaging suppliers seed once
-  and then remain administrator-managed. Assignment Excel imports are atomic.
+- Dashboard and Summary Excel output consume the same `summary_rows` query so
+  the live visualization stays consistent with generated report totals.
 
 ## Next deployment inputs
 

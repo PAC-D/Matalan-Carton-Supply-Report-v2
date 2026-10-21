@@ -10,29 +10,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Responsive multipage website with grouped navigation for Dashboard, Build reports, Tracker data, Rates, and Data import.
 - Branded PACD/Matalan page shell using the existing left and right logo assets.
-- Dashboard with tracker/carton/supplier KPIs, undated and unrated warnings, interactive monthly volumes, and conditional top supplier/factory rankings.
+- Dashboard with live Summary-report KPIs, quarterly packaging-supplier volumes, Standard/Custom breakdown and Tracker-to-eBiz reconciliation.
 - Editable tracker page for all imported `TRACK_STD` and `TRACK_CUS` source fields, with supplier filters and 250-row pagination.
 - Transactional tracker-edit validation, including manual `YYYY-MM-DD` and `DD/MM/YYYY` dates and recalculation of supplier keys.
 - Dockerfile, Docker Compose persistence, health check, and nginx reverse-proxy template for hosted deployment.
 - `CODEX.md` architecture and deployment handoff log.
-- Packaging-supplier master maintenance and factory-assignment pages based on the Primark workflow, including filters, pagination and Excel import/export.
 
 ### Changed
 
 - `app.py` is now the website router; feature UI is separated into page modules.
-- Dashboard spacing, KPI density, chart sizing, month labels, and supplier visualization were redesigned for a compact modern layout without overlapping graph content.
-- The monthly chart now spans the content width, supports removable supplier selections and a month-range selector, and scales its carton axis to the selected peak; `assets/favicon.png` is now the browser tab icon.
+- Dashboard spacing, KPI density and chart sizing were redesigned for a compact modern layout without overlapping graph content.
+- Dashboard filters now select fiscal year and packaging suppliers; all dashboard Summary values use the same aggregation source as the generated Summary Excel workbook. `assets/favicon.png` is the browser tab icon.
 - The fixed brand bar now includes an explicit responsive layout spacer, uses a larger Matalan logo, and cannot overlap dashboard content; the footer displays the current year and recurSID attribution dynamically.
 - The attribution is now a single compact chip fixed to the bottom-right of the viewport. It is rendered with the page header rather than as a footer section, reserves no document space, and page content scrolls behind it.
 - `run.bat` now creates a virtual environment and installs requirements automatically before launch.
 - Local and hosted report/database paths can be configured with `REPORTS_DIR` and `CARTON_DB`.
-- SQLite schema v4 adds managed packaging suppliers, tracker-discovered factories and guarded many-to-many factory assignments without changing historical shipment rows.
-- Test coverage increased to 85 checks, including assignment migration, supplier CRUD, deletion guards, Excel round-trips and page smoke coverage.
+- SQLite schema v5 removes the out-of-scope assignment-management tables while preserving tracker, rate, date-correction and eBiz data.
+- Test coverage includes schema migration, shared live-Summary calculations, reconciliation totals and page smoke coverage.
 
 ### Verification
 
-- 85 automated checks pass (`python -m pytest check.py -q`).
-- All eight website entry points load without exceptions.
+- 84 automated checks pass (`python -m pytest check.py -q`).
+- All five website entry points load without exceptions.
 - A live local server returned HTTP 200 and `ok` from `/_stcore/health`.
 
 ## [2.0.0] - 2026-10-19
