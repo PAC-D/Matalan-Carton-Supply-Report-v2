@@ -1,0 +1,18 @@
+services:
+  matalan-carton-report:
+    build: .
+    image: matalan-carton-report
+    container_name: matalan-carton-report
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8501:8501"
+    environment:
+      CARTON_DB: ${CARTON_DB:-/data/carton.db}
+      REPORTS_DIR: ${REPORTS_DIR:-/app/Reports}
+    volumes:
+      - carton-data:/data
+      - ./Reports:/app/Reports
+    mem_limit: 1g
+
+volumes:
+  carton-data:

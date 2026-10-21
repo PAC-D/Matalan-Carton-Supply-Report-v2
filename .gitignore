@@ -1,0 +1,9 @@
+﻿# Excel macro workbooks and generated reports are not source
+*.xlsm
+Reports/
+carton*.db
+data/
+.venv/
+.env
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,31 @@
+[server]
+headless = true
+maxUploadSize = 100
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#002B61"
+backgroundColor = "#F5F7FA"
+secondaryBackgroundColor = "#EEF2F7"
+textColor = "#0F1B2D"
+linkColor = "#0082CB"
+linkUnderline = false
+borderColor = "#DCE3EC"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "8px"
+buttonRadius = "8px"
+baseFontSize = 15
+font = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+headingFont = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+dataframeHeaderBackgroundColor = "#F1F5FA"
+dataframeBorderColor = "#E2E8F0"
+blueColor = "#0082CB"
+redColor = "#B61922"
+chartCategoricalColors = ["#002B61", "#00AEEF", "#B61922", "#1BAF7A", "#EDA100", "#4A3AA7"]

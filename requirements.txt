@@ -1,0 +1,9 @@
+# Runtime
+openpyxl==3.1.5
+pandas==3.0.5
+reportlab==5.0.0
+streamlit==1.61.1
+
+# Test suite (check.py)
+pypdf==6.16.0
+pytest==9.1.1
