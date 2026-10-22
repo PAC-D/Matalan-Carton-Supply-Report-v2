@@ -379,26 +379,18 @@ def cross_reference_xlsx(con, supplier, xref):
     _xref_header(ws, header_row, XREF_HEADERS)
     ws.print_title_rows = f"{header_row}:{header_row}"
     total = [0, 0, 0, 0]
-    for o in xref["orders"]:
-        values = [o["tracker_qty"], round(o["tracker_rebate"], 2), o["ebiz_qty"], round(o["ebiz_rebate"], 2)]
+    for o in core.cross_reference_rows(xref):
+        values = [o["tracker_qty"], o["tracker_rebate"], o["ebiz_qty"], o["ebiz_rebate"]]
         row = rows.add(16)
-        _xref_line(ws, row, [_order(o["so"])] + values + [values[0] - values[2], o["status"]])
-        ws.cell(row, 7).font = _font(bold=True, color=STATUS_COLORS[o["status"]])
-        total = _add(total, values)
-    no_so = [r for kind_rows in xref["rows"].values() for r in kind_rows if not r["so"]]
-    if no_so:
-        qty = sum(r["carton_qty"] or 0 for r in no_so)
-        rebate = round(sum((r["pacd"] or 0) + (r["matalan_rebate"] or 0) for r in no_so), 2)
-        _xref_line(ws, rows.add(16), ["(No SO#)", qty, rebate, None, None, qty, None])  # qty - 0: the column adds up
-        total = _add(total, [qty, rebate, 0, 0])
+        order = _order(o["so"]) if o["so"] != "(No SO#)" else o["so"]
+        _xref_line(ws, row, [order] + values + [o["qty_difference"], o["status"]])
+        if o["status"]:
+            ws.cell(row, 7).font = _font(bold=True, color=STATUS_COLORS[o["status"]])
+        total = _add(total, [value or 0 for value in values])
     _xref_line(ws, rows.add(18), ["Total"] + total + [round(total[0] - total[2], 2), None],
                BODY_BOLD, GRAND_FILL, GRAND_LINE)
 
-    groups = {}
-    for e in xref["ebiz_only"]:
-        group = groups.setdefault(e["key"] or "(no order number)", [0, 0])
-        group[0] += e["qty_shipped"] or 0
-        group[1] += e["total_rebate"] or 0
+    groups = core.ebiz_only_orders(xref)
     _print_setup(ws, ncols, rows.next - 1, f"Cross Reference  ·  {name}", now)
 
     # Own sheet: print titles repeat on every page of a sheet, so the tracker header must not sit above this list.
@@ -413,11 +405,11 @@ def cross_reference_xlsx(con, supplier, xref):
     _xref_header(ws, header_row, ["Order", "eBiz QTY", "eBiz Rebate"])
     ws.print_title_rows = f"{header_row}:{header_row}"
     if groups:
-        for order in sorted(groups, key=core.so_order):
-            qty, rebate = groups[order]
-            _xref_line(ws, rows.add(16), [_order(order), qty, round(rebate, 2)])
-        _xref_line(ws, rows.add(18), ["Total", sum(g[0] for g in groups.values()),
-                                      round(sum(g[1] for g in groups.values()), 2)], BODY_BOLD, GRAND_FILL, GRAND_LINE)
+        for group in groups:
+            _xref_line(ws, rows.add(16), [_order(group["order"]), group["ebiz_qty"], group["ebiz_rebate"]])
+        _xref_line(ws, rows.add(18), ["Total", sum(g["ebiz_qty"] for g in groups),
+                                      round(sum(g["ebiz_rebate"] for g in groups), 2)],
+                   BODY_BOLD, GRAND_FILL, GRAND_LINE)
     else:
         _span(ws, rows.add(16), 1, 3, "None", font=_font(italic=True, color=GREY_HEX), align=LEFT)
     _print_setup(ws, ncols, rows.next - 1, f"Cross Reference  ·  {name}", now)
@@ -506,7 +498,7 @@ def _total_line(text, rows, cols):
     return line
 
 
-def _block(label, rows, cols, widths):
+def _block(label, rows, cols, widths, table_title="Full Tracker Table"):
     """One carton type: banners, header, per-quarter rows with subtotals, block total."""
     qty_i = cols.index("carton_qty") + 1
     data = []
@@ -530,7 +522,7 @@ def _block(label, rows, cols, widths):
         style.extend([("SPAN", (0, r), (qty_i - 1, r)), ("BACKGROUND", (0, r), (-1, r), background),
                       ("FONT", (0, r), (-1, r), "Helvetica-Bold", 5.5), ("ALIGN", (0, r), (-1, r), "RIGHT")])
 
-    banner(f"Full Tracker Table - {label}", NAVY, 9)
+    banner(f"{table_title} - {label}", NAVY, 9)
     banner(f"{label} Carton", BLUE, 7)
     data.append([Paragraph("Sr No.", HEAD)] + [Paragraph(escape(h), HEAD) for h in _headers(rows, cols)])
     sr = 0
@@ -601,8 +593,8 @@ def _pdf(story, title):
     return buf.getvalue()
 
 
-def full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
-    """Full Tracker Sheet for PacD (brand "PacD") or for Matalan (brand "Matalan": no PACD column)."""
+def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filename,
+                 table_title="Full Tracker Table"):
     cols = TRACKER_COLS if brand == "PacD" else [c for c in TRACKER_COLS if c != "pacd"]
     blocks = [(label, core.rows(con, kind, supplier=supplier, fiscal_year=fiscal_year, quarters=quarters))
               for kind, label in KINDS]
@@ -613,11 +605,11 @@ def full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
     base = [BASE_WIDTHS["sr"]] + [BASE_WIDTHS[c] for c in cols]
     widths = [w * avail / sum(base) for w in base]
     name = core.supplier_name(con, supplier)
-    title = f"Full Tracker Report ({name})"
+    title = f"{report_name} ({name})"
     story = [_title_bar(title, avail), Spacer(1, 6)]
     for label, rows in blocks:
         if rows:
-            story += [_block(label, rows, cols, widths), Spacer(1, 8)]
+            story += [_block(label, rows, cols, widths, table_title), Spacer(1, 8)]
     qty_i = cols.index("carton_qty") + 1
     story.append(Table([_total_line("Tracker Grand Total", all_rows, cols)], colWidths=widths,
                        style=TableStyle(PADDING + [
@@ -626,7 +618,21 @@ def full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
                            ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 6), ("ALIGN", (0, 0), (-1, -1), "RIGHT")])))
     qs = sorted(quarters)
     span = f"Q{qs[0]}" if len(qs) == 1 else f"Q{qs[0]}-Q{qs[-1]}"
-    return f"Full Tracker Sheet for {brand}_{safe_name(name)}_{span}_{fiscal_year}.pdf", _pdf(story, title)
+    return filename.format(brand=brand, name=safe_name(name), span=span, year=fiscal_year), _pdf(story, title)
+
+
+def full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
+    """Full Tracker Sheet for PacD (brand "PacD") or for Matalan (brand "Matalan": no PACD column)."""
+    return _tracker_pdf(
+        con, supplier, fiscal_year, quarters, brand, "Full Tracker Report",
+        "Full Tracker Sheet for {brand}_{name}_{span}_{year}.pdf")
+
+
+def rebate_report_pdf(con, supplier, fiscal_year, quarters):
+    """Detailed tracker rebate report with both PACD and Matalan rebate columns."""
+    return _tracker_pdf(
+        con, supplier, fiscal_year, quarters, "PacD", "Rebate Report",
+        "Rebate Report_{name}_{span}_{year}.pdf", "Rebate Report")
 
 
 YELLOW = colors.HexColor("#FFFF99")
