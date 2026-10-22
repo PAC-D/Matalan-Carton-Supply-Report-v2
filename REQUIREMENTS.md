@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Document version** | 3.2 |
+| **Document version** | 3.3 |
 | **Product version** | 3.0.0 (in development) |
 | **Status** | In development |
 | **Last updated** | 2026-10-22 |
@@ -195,12 +195,15 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | FR-DISC-09 | The Cross Reference workbook shall contain a tracker-orders sheet with SO#, tracker quantity and rebate, eBiz quantity and rebate, quantity difference, and status, sorted by SO#, followed by a no-SO# line where applicable and a total line. |
 | FR-DISC-10 | The Cross Reference workbook shall contain a second sheet, “eBiz not in tracker”, with order, eBiz quantity, and eBiz rebate, plus a total line or “None”. |
 | FR-DISC-11 | The Cross Reference shall use the Summary-style title block, navy headers, A4 portrait fit-to-width print setup, repeated print titles, no gridlines, and page numbering. |
+| FR-DISC-12 | Dedicated Cross Reference and Discrepancy Report pages shall recalculate from the complete current Tracker and eBiz datasets whenever they are viewed. |
+| FR-DISC-13 | The live Cross Reference shall show Tracker/eBiz quantities and rebates, quantity differences, match status, SO_2 matches, no-SO totals, and aggregated eBiz-only orders. |
+| FR-DISC-14 | The live Discrepancy Report shall show the same five sections and row-level fields as the generated PDF and allow the current PDF to be prepared for download. |
 
 ### 5.9 Report delivery and UI
 
 | ID | Requirement |
 |---|---|
-| FR-UI-01 | The UI shall provide grouped website navigation for Dashboard, Build reports, Tracker data, Rates, and Data import pages. |
+| FR-UI-01 | The UI shall provide grouped website navigation for Dashboard, Build reports, Cross reference, Discrepancy report, Rebate report, Tracker data, Rates, and Data import pages. |
 | FR-UI-02 | The Data import page shall contain the tracker uploader, date review, preview, confirm action, result message, saved corrections, and eBiz upload section. |
 | FR-UI-03 | The Rates page shall contain the editable rate table and save action with validation errors shown to the user. |
 | FR-UI-04 | The Build reports page shall contain supplier, fiscal year, and quarter selectors; the discrepancy option; **Build reports**; **Save to Reports folder**; and per-file download buttons. |
@@ -213,6 +216,8 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | FR-UI-11 | The Dashboard shall provide fiscal-year and packaging-supplier filters and show total cartons, Standard/Custom carton totals, quarterly packaging-supplier volumes, the detailed Summary rows, and Tracker-to-eBiz reconciliation. |
 | FR-UI-12 | The repository shall include a non-root Docker image, persistent SQLite volume, report volume, health check, and nginx reverse-proxy template. |
 | FR-UI-13 | Dashboard Summary values and the generated Summary Excel workbook shall use the same calculation source so their supplier, quarter, carton-type, rate and amount values remain consistent. |
+| FR-UI-14 | The Reports navigation group shall include dedicated Cross Reference, Discrepancy Report and Rebate Report pages. |
+| FR-UI-15 | The live Rebate Report shall filter by packaging supplier, fiscal year and quarter; show Standard and Custom detail rows and totals; and allow the current PDF to be prepared for download. |
 
 ## 6. Data requirements
 
@@ -291,11 +296,12 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | AC-09 | Reconciliation covers SO_1 match, SO_2 fallback, eBiz-only, Not in eBiz, tracker > eBiz, tracker < eBiz, Match, no-SO# rows, and undated tracker rows. |
 | AC-10 | The Discrepancy Report contains every section title and the empty-section message; the Cross Reference values and totals match the reconciliation structure. |
 | AC-11 | `python -m pytest check.py -q` passes all automated checks. |
-| AC-12 | The app starts on localhost and its Dashboard, Reports, Tracker, Rates, and Import pages load without errors. |
+| AC-12 | The app starts on localhost and all eight Dashboard, report, Tracker, Rates, and Import pages load without errors. |
 | AC-13 | A user can edit a PO, date and quantity in Tracker data; valid changes persist and an invalid row rolls back the complete save. |
 | AC-14 | The running app returns HTTP 200 from the Streamlit health endpoint. |
 | AC-15 | Upgrading a version-4 database removes obsolete assignment-management tables without deleting tracker, rate, date-correction, or eBiz data. |
 | AC-16 | Dashboard Summary rows equal the supplier/quarter/carton-type values used by the generated Summary workbook. |
+| AC-17 | The Cross Reference, Discrepancy Report and Rebate Report pages load without error and display current database values for the selected supplier and period. |
 
 ## 9. Assumptions and constraints
 
@@ -316,6 +322,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | Date review | `core.py`, `pages/5_Import.py` | `test_dates_that_look_right_are_not_listed`, `test_reviewed_dates_are_imported_and_reused_next_time`, `test_forgotten_correction_is_checked_again` |
 | Tracker editing | `core.py`, `pages/3_Tracker.py` | `test_tracker_rows_can_be_manually_edited`, `test_invalid_tracker_edit_rolls_back` |
 | Live Summary dashboard | `core.py`, `pages/1_Dashboard.py`, `reports.py` | `test_live_summary_rows_match_report_totals`, `test_cross_reference_overview_drives_live_dashboard`, `test_app_smoke` |
+| Live report pages | `core.py`, `pages/6_Cross_Reference.py`, `pages/7_Discrepancy_Report.py`, `pages/8_Rebate_Report.py` | `test_live_report_pages`, `test_cross_reference`, `test_rebate_report_pdf` |
 | Tracker reports | `reports.py` | `test_summary_xlsx`, `test_full_tracker_pdf_pacd`, `test_raw_data_xlsx`, `test_shipment_tracking_xlsx`, `test_save_all` |
 | eBiz import | `core.py`, `pages/5_Import.py` | `test_read_ebiz_splits_order_numbers`, `test_ebiz_upload_replaces_all_ebiz_data`, `test_app_replaces_ebiz_data` |
 | Reconciliation | `core.py` | `test_cross_reference` |
@@ -326,6 +333,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 
 | Version | Date | Change |
 |---|---|---|
+| 3.3 | 2026-10-22 | Added dedicated live Cross Reference, Discrepancy Report and Rebate Report pages with matching report downloads |
 | 3.2 | 2026-10-22 | Refocused the website on the editable Tracker and a live dashboard matching the generated Summary and reconciliation reports; removed assignment management |
 | 3.1 | 2026-10-21 | Packaging-supplier catalog and factory-assignment management requirements |
 | 3.0 | 2026-10-20 | Responsive hosted website, dashboard, multipage navigation, editable tracker and Docker deployment requirements |

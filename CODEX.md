@@ -12,9 +12,12 @@
 
 1. Dashboard — live Summary-report KPIs, quarterly supplier totals, STD/CUS breakdown and Tracker-to-eBiz reconciliation.
 2. Build reports — fiscal year/quarter filters and ZIP/single-file downloads.
-3. Tracker data — editable `TRACK_STD` and `TRACK_CUS` database rows.
-4. Rates — date-effective PACD and Matalan percentages.
-5. Data import — tracker date review and all-vendor eBiz replacement.
+3. Cross reference — live order-level Tracker/eBiz reconciliation and workbook download.
+4. Discrepancy report — live five-section exception review and PDF download.
+5. Rebate report — live Standard/Custom rebate details and PDF download.
+6. Tracker data — editable `TRACK_STD` and `TRACK_CUS` database rows.
+7. Rates — date-effective PACD and Matalan percentages.
+8. Data import — tracker date review and all-vendor eBiz replacement.
 
 ## Important decisions
 
@@ -28,6 +31,9 @@
   `DD/MM/YYYY`; report-only fields are recalculated and cannot be edited.
 - Dashboard and Summary Excel output consume the same `summary_rows` query so
   the live visualization stays consistent with generated report totals.
+- Cross Reference live rows and the generated workbook share the same
+  order/no-SO/eBiz-only aggregations; discrepancy and rebate pages read the
+  same calculated database views used by their PDFs.
 
 ## Next deployment inputs
 

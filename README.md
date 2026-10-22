@@ -15,6 +15,9 @@ for hosting.
 |---|---|---|
 | Overview | **Dashboard** | Live Summary-report totals, quarterly supplier volumes, STD/CUS breakdown, and Tracker-to-eBiz reconciliation |
 | Reports | **Build reports** | Supplier/fiscal-period filters and ZIP or individual report downloads |
+| Reports | **Cross reference** | Live order-level Tracker/eBiz quantities, rebates, differences, match status, and eBiz-only orders |
+| Reports | **Discrepancy report** | Live versions of all five discrepancy sections with a matching PDF download |
+| Reports | **Rebate report** | Live Standard/Custom carton details, rebate totals, and a matching PDF download |
 | Manage | **Tracker data** | Edit imported `TRACK_STD` and `TRACK_CUS` rows, including dates, POs, quantities and prices |
 | Manage | **Rates** | Maintain date-effective PACD and Matalan rebate percentages |
 | Manage | **Data import** | Import tracker workbooks, review suspicious dates and replace eBiz vendor data |
@@ -31,6 +34,8 @@ appears in navigation and the Matalan wordmark appears in the top bar.
   transaction.
 - Shows a live dashboard calculated from the same supplier, quarter, rate and
   carton-type rows used to generate the Summary Excel workbook.
+- Shows Cross Reference, Discrepancy Report and Rebate Report data as dedicated
+  live website pages, with the same calculations used by their downloads.
 - Maintains date-effective PACD and Matalan rebate rates.
 - Imports all current eBiz vendor exports as one atomic replacement.
 - Creates Summary, Full Tracker, Raw Data, Shipment Tracking, Discrepancy and
@@ -147,6 +152,15 @@ current vendor file must be uploaded together.
 Open **Build reports**, select suppliers, fiscal year and quarters, then build
 a downloadable ZIP or save files under `Reports/<Month>/`.
 
+### Review live reports
+
+- Open **Cross reference** and select a packaging supplier to review every
+  Tracker order against eBiz, including no-SO and eBiz-only totals.
+- Open **Discrepancy report** to review its five exception sections and prepare
+  the corresponding PDF.
+- Open **Rebate report** to filter by supplier, fiscal year and quarter, review
+  Standard and Custom calculations, and prepare the corresponding PDF.
+
 ## Database and backups
 
 | Setting | Purpose | Default |
@@ -178,7 +192,7 @@ manual tracker editing, report generation and page smoke tests.
 
 ```text
 app.py              Website navigation
-pages/              Dashboard, reports, tracker editor, rates and imports
+pages/              Dashboard, report views/builders, tracker editor, rates and imports
 web_ui.py           Responsive PACD/Matalan theme and shared page chrome
 core.py             SQLite schema, imports, edits, queries and reconciliation
 reports.py          Excel/PDF report builders

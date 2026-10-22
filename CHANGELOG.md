@@ -8,9 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-- Responsive multipage website with grouped navigation for Dashboard, Build reports, Tracker data, Rates, and Data import.
+- Responsive multipage website with grouped navigation for Dashboard, report building/live views, Tracker data, Rates, and Data import.
 - Branded PACD/Matalan page shell using the existing left and right logo assets.
 - Dashboard with live Summary-report KPIs, quarterly packaging-supplier volumes, Standard/Custom breakdown and Tracker-to-eBiz reconciliation.
+- Dedicated live Cross Reference, Discrepancy Report and Rebate Report pages under Reports, including report-aligned filters, totals, detail tables and downloads.
 - Editable tracker page for all imported `TRACK_STD` and `TRACK_CUS` source fields, with supplier filters and 250-row pagination.
 - Transactional tracker-edit validation, including manual `YYYY-MM-DD` and `DD/MM/YYYY` dates and recalculation of supplier keys.
 - Dockerfile, Docker Compose persistence, health check, and nginx reverse-proxy template for hosted deployment.
@@ -30,8 +31,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Verification
 
-- 84 automated checks pass (`python -m pytest check.py -q`).
-- All five website entry points load without exceptions.
+- 89 automated checks pass (`python -m pytest check.py -q`).
+- All eight website entry points load without exceptions.
 - A live local server returned HTTP 200 and `ok` from `/_stcore/health`.
 
 ## [2.0.0] - 2026-10-19
