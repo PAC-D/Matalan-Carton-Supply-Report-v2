@@ -15,6 +15,12 @@ pages = {
     "Reports": [
         st.Page("pages/2_Reports.py", title="Build reports",
                 icon=":material/description:", url_path="reports"),
+        st.Page("pages/6_Cross_Reference.py", title="Cross reference",
+                icon=":material/compare_arrows:", url_path="cross-reference"),
+        st.Page("pages/7_Discrepancy_Report.py", title="Discrepancy report",
+                icon=":material/difference:", url_path="discrepancy-report"),
+        st.Page("pages/8_Rebate_Report.py", title="Rebate report",
+                icon=":material/payments:", url_path="rebate-report"),
     ],
     "Manage": [
         st.Page("pages/3_Tracker.py", title="Tracker data",
