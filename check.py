@@ -960,6 +960,18 @@ def test_cross_reference_overview_drives_live_dashboard(xref_con):
     }
 
 
+def test_live_cross_reference_rows_match_generated_report_structure(xref_con):
+    xref = core.cross_reference(xref_con, "PACK")
+    assert core.cross_reference_rows(xref)[-1] == {
+        "so": "(No SO#)", "tracker_qty": 7, "tracker_rebate": 0.62,
+        "ebiz_qty": None, "ebiz_rebate": None, "qty_difference": 7,
+        "status": None, "via_so2": False,
+    }
+    assert core.ebiz_only_orders(xref) == [
+        {"order": "8888", "ebiz_qty": 7.0, "ebiz_rebate": 0.5}
+    ]
+
+
 DISCREPANCY_TITLES = ("Tracker Orders Not Found in eBiz", "Quantity Mismatch (Tracker > eBiz)",
                       "Quantity Mismatch (Tracker < eBiz)", "Tracker Rows With No SO#",
                       "eBiz Orders Not Found in Tracker")
@@ -974,6 +986,32 @@ def test_discrepancy_pdf(xref_con):
         assert expected in text, expected
     assert "No discrepancies found." not in text
     assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2  # both logos
+
+
+def test_rebate_report_pdf(demo_con):
+    name, data = reports.rebate_report_pdf(demo_con, TW_KEY, 2026, [3])
+    assert name == "Rebate Report_Transworld Packaging (BD) Ltd_Q3_2026.pdf"
+    text = pdf_text(data)
+    assert "Rebate Report (Transworld Packaging (BD) Ltd.)" in text
+    assert "Standard Carton" in text and "Custom Carton" in text
+    assert "PACD" in text and "Rebates" in text and "for Matalan" in text
+
+
+@pytest.mark.parametrize("page_name, expected_control", [
+    ("6_Cross_Reference.py", "Download Cross Reference workbook"),
+    ("7_Discrepancy_Report.py", "Prepare Discrepancy Report PDF"),
+    ("8_Rebate_Report.py", "Prepare Rebate Report PDF"),
+])
+def test_live_report_pages(xref_con, monkeypatch, page_name, expected_control):
+    from streamlit.testing.v1 import AppTest
+    database = xref_con.execute("PRAGMA database_list").fetchone()[2]
+    monkeypatch.setenv("CARTON_DB", database)
+    at = AppTest.from_file(str(HERE / "pages" / page_name), default_timeout=60).run()
+    assert not at.exception
+    assert at.selectbox[0].label == "Packaging supplier"
+    controls = [button.label for button in at.button]
+    controls += [button.label for button in at.get("download_button")]
+    assert expected_control in controls
 
 
 def test_discrepancy_pdf_says_when_a_section_is_empty(tmp_path):
