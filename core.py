@@ -670,6 +670,42 @@ def cross_reference(con, supplier):
             "ebiz_only": ebiz_only}
 
 
+def cross_reference_rows(xref):
+    """Order-level rows shared by the live view and generated Cross Reference workbook."""
+    result = [{
+        "so": order["so"],
+        "tracker_qty": order["tracker_qty"],
+        "tracker_rebate": round(order["tracker_rebate"], 2),
+        "ebiz_qty": order["ebiz_qty"],
+        "ebiz_rebate": round(order["ebiz_rebate"], 2),
+        "qty_difference": order["tracker_qty"] - order["ebiz_qty"],
+        "status": order["status"],
+        "via_so2": order["via_so2"],
+    } for order in xref["orders"]]
+    no_so = [row for rows in xref["rows"].values() for row in rows if not row["so"]]
+    if no_so:
+        qty = sum(row["carton_qty"] or 0 for row in no_so)
+        rebate = round(sum((row["pacd"] or 0) + (row["matalan_rebate"] or 0)
+                           for row in no_so), 2)
+        result.append({
+            "so": "(No SO#)", "tracker_qty": qty, "tracker_rebate": rebate,
+            "ebiz_qty": None, "ebiz_rebate": None, "qty_difference": qty,
+            "status": None, "via_so2": False,
+        })
+    return result
+
+
+def ebiz_only_orders(xref):
+    """Aggregated eBiz orders missing from Tracker, shared by live and generated reports."""
+    groups = {}
+    for row in xref["ebiz_only"]:
+        group = groups.setdefault(row["key"] or "(no order number)", [0, 0.0])
+        group[0] += row["qty_shipped"] or 0
+        group[1] += row["total_rebate"] or 0
+    return [{"order": order, "ebiz_qty": values[0], "ebiz_rebate": round(values[1], 2)}
+            for order, values in sorted(groups.items(), key=lambda item: so_order(item[0]))]
+
+
 def get_rates(con):
     """All rates, STD first, oldest first. Percentages are fractions (0.075 = 7.5%)."""
     return [dict(r) for r in con.execute(
@@ -934,11 +970,19 @@ def tracker_suppliers(con):
 
 
 def supplier_name(con, key):
-    """Most common packaging supplier spelling of a supplier key (alphabetical first on a tie), else the key."""
-    src, params = _dated(supplier=key)
-    row = con.execute(f"SELECT packaging_supplier FROM {src} WHERE packaging_supplier IS NOT NULL "
-                      f"GROUP BY packaging_supplier ORDER BY COUNT(*) DESC, packaging_supplier LIMIT 1",
-                      params).fetchone()
+    """Most common Tracker supplier spelling, then eBiz vendor spelling, else the key."""
+    src = " UNION ALL ".join(
+        f"SELECT packaging_supplier, supplier_key FROM {table}" for table in TABLES.values())
+    row = con.execute(
+        f"SELECT packaging_supplier FROM ({src}) "
+        "WHERE supplier_key IS ? AND packaging_supplier IS NOT NULL "
+        "GROUP BY packaging_supplier ORDER BY COUNT(*) DESC, packaging_supplier LIMIT 1",
+        (key,)).fetchone()
+    if row:
+        return row[0]
+    row = con.execute(
+        "SELECT vendor FROM ebiz WHERE vendor_key IS ? AND vendor IS NOT NULL "
+        "GROUP BY vendor ORDER BY COUNT(*) DESC, vendor LIMIT 1", (key,)).fetchone()
     return row[0] if row else key
 
 
