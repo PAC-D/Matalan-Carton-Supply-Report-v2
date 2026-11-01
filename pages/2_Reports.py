@@ -12,6 +12,7 @@ REPORTS_DIR = Path(os.environ.get(
 
 
 @st.fragment
+@page
 def report_controls():
     con = core.connect()
     suppliers = core.suppliers(con)

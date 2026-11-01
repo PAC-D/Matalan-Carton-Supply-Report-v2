@@ -159,7 +159,8 @@ def connect(url=None):
     url = url or os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL is not set.")
-    con = psycopg.connect(url, autocommit=True, row_factory=_row_factory)
+    timeout = {} if "connect_timeout" in url else {"connect_timeout": 10}  # a silent server fails fast
+    con = psycopg.connect(url, autocommit=True, row_factory=_row_factory, **timeout)
     if url not in _ready:
         with con.transaction():
             con.execute(_schema())
@@ -628,7 +629,7 @@ def ebiz_status(con):
 def ebiz_vendors(con):
     """Vendor keys in the eBiz data, sorted."""
     return [r[0] for r in con.execute(
-        "SELECT DISTINCT vendor_key FROM ebiz WHERE vendor_key IS NOT NULL ORDER BY 1")]
+        'SELECT DISTINCT vendor_key COLLATE "C" FROM ebiz WHERE vendor_key IS NOT NULL ORDER BY 1')]
 
 
 def so_order(so):
@@ -960,7 +961,7 @@ def suppliers(con):
     """Supplier keys of the dated rows, sorted."""
     src, params = _dated()
     return [r[0] for r in con.execute(
-        f"SELECT DISTINCT supplier_key FROM {src} WHERE supplier_key IS NOT NULL ORDER BY 1", params)]
+        f"SELECT DISTINCT supplier_key COLLATE \"C\" FROM {src} WHERE supplier_key IS NOT NULL ORDER BY 1", params)]
 
 
 def tracker_suppliers(con):
@@ -968,7 +969,7 @@ def tracker_suppliers(con):
     sql = " UNION ".join(
         f"SELECT supplier_key FROM {table} WHERE supplier_key IS NOT NULL"
         for table in TABLES.values())
-    return [r[0] for r in con.execute(f"SELECT supplier_key FROM ({sql}) ORDER BY 1")]
+    return [r[0] for r in con.execute(f'SELECT supplier_key FROM ({sql}) ORDER BY supplier_key COLLATE "C"')]
 
 
 def reconciliation_suppliers(con):
@@ -983,13 +984,13 @@ def supplier_name(con, key):
     row = con.execute(
         f"SELECT packaging_supplier FROM ({src}) "
         "WHERE supplier_key IS NOT DISTINCT FROM %s AND packaging_supplier IS NOT NULL "
-        "GROUP BY packaging_supplier ORDER BY COUNT(*) DESC, packaging_supplier LIMIT 1",
+        'GROUP BY packaging_supplier ORDER BY COUNT(*) DESC, packaging_supplier COLLATE "C" LIMIT 1',
         (key,)).fetchone()
     if row:
         return row[0]
     row = con.execute(
         "SELECT vendor FROM ebiz WHERE vendor_key IS NOT DISTINCT FROM %s AND vendor IS NOT NULL "
-        "GROUP BY vendor ORDER BY COUNT(*) DESC, vendor LIMIT 1", (key,)).fetchone()
+        'GROUP BY vendor ORDER BY COUNT(*) DESC, vendor COLLATE "C" LIMIT 1', (key,)).fetchone()
     return row[0] if row else key
 
 

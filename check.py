@@ -1015,6 +1015,50 @@ def test_live_report_pages(xref_con, monkeypatch, page_name, expected_control):
     assert expected_control in controls
 
 
+def test_docker_image_never_contains_the_env_file():
+    ignored = (HERE / ".dockerignore").read_text(encoding="utf-8-sig").split()
+    assert ".env" in ignored
+
+
+def test_connect_gives_up_on_a_silent_server():
+    import socket
+    import threading
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()  # accepts TCP but never answers, like an RDS endpoint that went quiet
+    url = f"postgresql://nobody:x@127.0.0.1:{server.getsockname()[1]}/none"
+    outcome = []
+
+    def attempt():
+        try:
+            core.connect(url)
+        except psycopg.OperationalError as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=attempt, daemon=True)
+    worker.start()
+    worker.join(15)
+    server.close()
+    assert outcome, "connect() still waiting after 15 s"
+
+
+def test_every_fragment_has_the_error_panel():
+    # A fragment rerun skips main(); without @page a database error there shows a raw traceback.
+    for path in (HERE / "pages").glob("*.py"):
+        for decorator in re.findall(r"@st\.fragment\s*\n(\S+)", path.read_text(encoding="utf-8")):
+            assert decorator == "@page", path.name
+
+
+def test_supplier_lists_sort_like_python(tmp_path):
+    con = core.connect()
+    for name in ("M-Pack Ltd.", "M&U Pack Ltd.", "Maxpac Ltd."):
+        insert(con, "STD", shipment_date="2026-08-03", packaging_supplier=name,
+               supplier_key=core.supplier_key(name), carton_qty=1, unit_price=1.0, total_amount=1.0)
+    expected = sorted(core.supplier_key(n) for n in ("M-Pack Ltd.", "M&U Pack Ltd.", "Maxpac Ltd."))
+    assert core.suppliers(con) == expected
+    assert core.tracker_suppliers(con) == expected
+
+
 def test_page_shows_error_panel_when_database_is_unreachable(monkeypatch):
     from streamlit.testing.v1 import AppTest
     monkeypatch.setenv("DATABASE_URL", "postgresql://nobody:wrong@127.0.0.1:1/none?connect_timeout=2")

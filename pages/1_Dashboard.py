@@ -115,6 +115,7 @@ def cross_reference_section(con, selected_suppliers):
 
 
 @st.fragment
+@page
 def live_summary():
     con = core.connect()
     years = core.fiscal_years(con)
