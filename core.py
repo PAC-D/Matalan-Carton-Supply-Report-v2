@@ -1,18 +1,14 @@
-"""SQLite storage, Excel import and report queries for the Matalan carton tracker."""
+"""PostgreSQL storage, Excel import and report queries for the Matalan carton tracker."""
 import hashlib
 import json
 import math
 import os
 import re
-import sqlite3
 from datetime import date, datetime, timedelta
-from io import BytesIO
-from pathlib import Path
 
 import openpyxl
+import psycopg
 
-DEFAULT_DB = Path(__file__).with_name("carton.db")
-SCHEMA_VERSION = 5
 TABLES = {"STD": "track_std", "CUS": "track_cus"}
 SHEETS = {"STD": "TRACK_STD", "CUS": "TRACK_CUS"}
 
@@ -76,38 +72,39 @@ SEED_RATES = [
 ]
 
 VIEW_SQL = """
-CREATE VIEW {view} AS
+CREATE OR REPLACE VIEW {view} AS
 SELECT t.*, r.pacd_pct, r.matalan_pct,
   t.unit_price * t.carton_qty * r.matalan_pct AS matalan_rebate,
   (t.total_amount - t.unit_price * t.carton_qty * r.matalan_pct) * r.pacd_pct AS pacd,
-  CAST(strftime('%Y', t.shipment_date) AS INTEGER) + (strftime('%m', t.shipment_date) = '12') AS fiscal_year,
+  EXTRACT(YEAR FROM t.shipment_date::date)::int
+    + (EXTRACT(MONTH FROM t.shipment_date::date) = 12)::int AS fiscal_year,
   CASE
     WHEN t.shipment_date IS NULL THEN NULL
-    WHEN CAST(strftime('%m', t.shipment_date) AS INTEGER) IN (12, 1, 2, 3) THEN 1
-    WHEN CAST(strftime('%m', t.shipment_date) AS INTEGER) BETWEEN 4 AND 6 THEN 2
-    WHEN CAST(strftime('%m', t.shipment_date) AS INTEGER) IN (7, 8) THEN 3
+    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int IN (12, 1, 2, 3) THEN 1
+    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int BETWEEN 4 AND 6 THEN 2
+    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int IN (7, 8) THEN 3
     ELSE 4
   END AS quarter
 FROM {table} t
 LEFT JOIN rates r ON r.carton_type = '{kind}' AND r.effective_from = (
   SELECT MAX(effective_from) FROM rates
-  WHERE carton_type = '{kind}' AND effective_from <= t.shipment_date);
+  WHERE carton_type = '{kind}' AND effective_from::date <= t.shipment_date::date);
 """
 
 
 def _col_type(col):
-    return "INTEGER" if col in INT_COLS else "REAL" if col in REAL_COLS else "TEXT"
+    return "INTEGER" if col in INT_COLS else "DOUBLE PRECISION" if col in REAL_COLS else "TEXT"
 
 
 def _schema():
     cols = ",\n  ".join(f"{c} {_col_type(c)}" for c in COLUMNS)
-    sql = [f"CREATE TABLE IF NOT EXISTS {t} (\n  id INTEGER PRIMARY KEY,\n  {cols},\n"
+    sql = [f"CREATE TABLE IF NOT EXISTS {t} (\n  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n  {cols},\n"
            f"  supplier_key TEXT,\n  source_file TEXT,\n  imported_at TEXT\n);" for t in TABLES.values()]
     sql.append("""CREATE TABLE IF NOT EXISTS rates (
   carton_type TEXT NOT NULL CHECK (carton_type IN ('STD', 'CUS')),
   effective_from TEXT NOT NULL,
-  pacd_pct REAL NOT NULL,
-  matalan_pct REAL NOT NULL,
+  pacd_pct DOUBLE PRECISION NOT NULL,
+  matalan_pct DOUBLE PRECISION NOT NULL,
   PRIMARY KEY (carton_type, effective_from)
 );""")
     sql.append("""CREATE TABLE IF NOT EXISTS date_fixes (
@@ -122,36 +119,53 @@ def _schema():
   shipment_date TEXT,
   saved_at TEXT NOT NULL
 );""")
-    ebiz_cols = ",\n  ".join(f"{c} {'REAL' if c in EBIZ_REAL else 'TEXT'}" for c in EBIZ_COLUMNS)
-    sql.append(f"CREATE TABLE IF NOT EXISTS ebiz (\n  id INTEGER PRIMARY KEY,\n  {ebiz_cols},\n"
+    ebiz_cols = ",\n  ".join(f"{c} {'DOUBLE PRECISION' if c in EBIZ_REAL else 'TEXT'}" for c in EBIZ_COLUMNS)
+    sql.append(f"CREATE TABLE IF NOT EXISTS ebiz (\n  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n  {ebiz_cols},\n"
                f"  source_file TEXT,\n  imported_at TEXT\n);")
     for kind, table in TABLES.items():
         view = f"v_{kind.lower()}"
-        sql.append(f"DROP VIEW IF EXISTS {view};")
         sql.append(VIEW_SQL.format(view=view, table=table, kind=kind))
     return "\n".join(sql)
 
 
-def connect(path=None):
-    """Open the database; create the schema when its version is not SCHEMA_VERSION.
+class Row(tuple):
+    """A result row read by position or by column name, like sqlite3.Row."""
 
-    Path: the argument, else env CARTON_DB, else carton.db next to this file.
+    def __new__(cls, names, values):
+        row = super().__new__(cls, values)
+        row._names = names
+        return row
+
+    def keys(self):
+        return self._names
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._names.index(key) if isinstance(key, str) else key)
+
+
+def _row_factory(cursor):
+    names = [c.name for c in cursor.description or ()]
+    return lambda values: Row(names, values)
+
+
+_ready = set()  # database URLs whose schema this process has created
+
+
+def connect(url=None):
+    """Open an autocommit connection; create the schema and seed rates once per process.
+
+    URL: the argument, else env DATABASE_URL. Writes go in `with con.transaction():`.
     """
-    con = sqlite3.connect(path or os.environ.get("CARTON_DB") or DEFAULT_DB)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-        con.executescript(_schema())
-        con.executescript("""
-DROP TABLE IF EXISTS factory_assignments;
-DROP TABLE IF EXISTS assignment_factories;
-DROP TABLE IF EXISTS packaging_suppliers;
-DROP TABLE IF EXISTS app_meta;
-""")
-        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    if not con.execute("SELECT 1 FROM rates LIMIT 1").fetchone():
-        with con:
-            con.executemany("INSERT INTO rates VALUES (?, ?, ?, ?)", SEED_RATES)
+    url = url or os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL is not set.")
+    con = psycopg.connect(url, autocommit=True, row_factory=_row_factory)
+    if url not in _ready:
+        with con.transaction():
+            con.execute(_schema())
+            if not con.execute("SELECT 1 FROM rates LIMIT 1").fetchone():
+                con.cursor().executemany("INSERT INTO rates VALUES (%s, %s, %s, %s)", SEED_RATES)
+        _ready.add(url)
     return con
 
 

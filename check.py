@@ -1,4 +1,6 @@
 """Self-check for the carton tracker. Run: python -m pytest check.py -v"""
+import gc
+import os
 import re
 import zipfile
 from datetime import date, datetime
@@ -6,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 
 import openpyxl
+import psycopg
 import pypdf
 import pytest
 
@@ -21,10 +24,24 @@ TW_KEY = "TRANSWORLD"
 UG_KEY = "UNIGLORY"
 
 
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+
+
+@pytest.fixture(autouse=True)
+def pg(monkeypatch):
+    """A clean database for every test; core.connect() finds it through DATABASE_URL."""
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as con:
+        con.execute("DROP SCHEMA public CASCADE")
+        con.execute("CREATE SCHEMA public")
+    core._ready.clear()
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    yield TEST_DATABASE_URL
+
+
 def insert(con, kind, **values):
     cols = ", ".join(values)
-    marks = ", ".join("?" * len(values))
-    with con:
+    marks = ", ".join(["%s"] * len(values))
+    with con.transaction():
         con.execute(f"INSERT INTO {core.TABLES[kind]} ({cols}) VALUES ({marks})", list(values.values()))
 
 
@@ -51,7 +68,7 @@ def test_shared_chrome_reserves_header_space_and_renders_floating_chip(monkeypat
 
 
 def test_quarter_mapping(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     cases = {
         "2025-12-01": (2026, 1), "2026-03-31": (2026, 1), "2026-04-01": (2026, 2),
         "2026-08-31": (2026, 3), "2026-09-01": (2026, 4), "2026-11-30": (2026, 4),
@@ -64,7 +81,7 @@ def test_quarter_mapping(tmp_path):
 
 
 def test_rate_follows_shipment_date(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "CUS", shipment_date="2026-06-30", carton_qty=100, unit_price=2.0, total_amount=200.0)
     insert(con, "CUS", shipment_date="2026-07-01", carton_qty=100, unit_price=2.0, total_amount=200.0)
     insert(con, "STD", shipment_date="2026-07-01", carton_qty=100, unit_price=2.0, total_amount=200.0)
@@ -79,7 +96,7 @@ def test_rate_follows_shipment_date(tmp_path):
 
 
 def test_rebate_uses_unit_price_and_pacd_uses_total(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "STD", shipment_date="2026-08-01", carton_qty=100, unit_price=2.0, total_amount=999.0)
     r = con.execute("SELECT * FROM v_std").fetchone()
     assert r["matalan_rebate"] == pytest.approx(10.0)  # 2.0 * 100 * 5%
@@ -87,48 +104,49 @@ def test_rebate_uses_unit_price_and_pacd_uses_total(tmp_path):
 
 
 def test_row_without_date_has_no_rate_or_quarter(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "CUS", shipment_date=None, carton_qty=5, unit_price=1.0, total_amount=5.0)
     r = con.execute("SELECT * FROM v_cus").fetchone()
     assert (r["pacd"], r["matalan_rebate"], r["fiscal_year"], r["quarter"]) == (None, None, None, None)
 
 
+def test_view_numbers_are_python_ints_and_floats():
+    con = core.connect()
+    insert(con, "STD", shipment_date="2026-08-01", carton_qty=100, unit_price=2.0, total_amount=200.0)
+    r = con.execute("SELECT * FROM v_std").fetchone()
+    assert type(r["fiscal_year"]) is int and type(r["quarter"]) is int
+    assert type(r["pacd"]) is float and type(r["matalan_rebate"]) is float
+    totals = con.execute("SELECT SUM(carton_qty), SUM(total_amount) FROM v_std").fetchone()
+    assert type(totals[0]) is int and type(totals[1]) is float
+
+
+def test_rows_act_like_sqlite_rows():
+    con = core.connect()
+    r = con.execute("SELECT 1 AS a, 'x' AS b").fetchone()
+    assert (r[0], r["b"], dict(r), tuple(r)) == (1, "x", {"a": 1, "b": "x"}, (1, "x"))
+
+
+def test_connect_without_url_is_a_clear_error(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL")
+    with pytest.raises(RuntimeError, match="DATABASE_URL is not set"):
+        core.connect()
+
+
 def test_connect_is_repeatable_and_seeds_once(tmp_path):
-    core.connect(tmp_path / "t.db")
-    con = core.connect(tmp_path / "t.db")
+    core.connect()
+    con = core.connect()
     assert con.execute("SELECT COUNT(*) FROM rates").fetchone()[0] == 4
 
 
-def test_connect_does_not_rewrite_a_current_schema(tmp_path, monkeypatch):
-    core.connect(tmp_path / "t.db")
+def test_connect_does_not_rewrite_a_current_schema(monkeypatch):
+    core.connect()
 
     def fail():
         raise AssertionError("schema re-run on a current database")
 
     monkeypatch.setattr(core, "_schema", fail)
-    core.connect(tmp_path / "t.db")
+    core.connect()
 
-
-def test_schema_v5_upgrade_removes_assignment_tables_without_losing_report_data(tmp_path):
-    path = tmp_path / "t.db"
-    con = core.connect(path)
-    insert(con, "STD", factory_name="Factory A", packaging_supplier="Pack A",
-           supplier_key="PACK", carton_qty=10)
-    with con:
-        con.execute("CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT)")
-        con.execute("CREATE TABLE packaging_suppliers (id INTEGER PRIMARY KEY, name TEXT)")
-        con.execute("CREATE TABLE assignment_factories (id INTEGER PRIMARY KEY, name TEXT)")
-        con.execute("CREATE TABLE factory_assignments (factory_id INTEGER, packaging_supplier_id INTEGER)")
-        con.execute("PRAGMA user_version = 4")
-    con.close()
-
-    con = core.connect(path)
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 5
-    assert con.execute("SELECT COUNT(*) FROM track_std").fetchone()[0] == 1
-    tables = {row[0] for row in con.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert not {"app_meta", "packaging_suppliers", "assignment_factories",
-                "factory_assignments"} & tables
 
 @pytest.mark.parametrize("name, key", [
     ("M&U  Packaging Ltd.", "M&U"),
@@ -174,7 +192,7 @@ def make_xlsx(path, std=(), cus=(), drop=None, formula_total=False, names=("TRAC
 
 
 def test_demo_import_counts_and_totals(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     data = core.read_workbook(DEMO)
     assert {k: len(v) for k, v in data.items()} == {"STD": 88, "CUS": 118}
     assert core.save_many(con, {DEMO.name: data})[DEMO.name] == {"STD": 88, "CUS": 118}
@@ -261,7 +279,7 @@ def proposals(issues):
 
 
 def test_dates_that_look_right_are_not_listed(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     _, reused, issues = date_check(con, tmp_path,
                                    rec(ship="2025-12-21", po_received_date=datetime(2025, 12, 6)),
                                    rec(ship="2026-04-21", po_received_date=datetime(2025, 12, 25)),  # long lead time
@@ -270,7 +288,7 @@ def test_dates_that_look_right_are_not_listed(tmp_path):
 
 
 def test_text_dates_are_read_day_first(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     files, _, issues = date_check(con, tmp_path, rec(ship="2025-12-21", po_received_date="18/12/2025"))
     assert files["a.xlsx"]["STD"][0]["po_received_date"] == "2025-12-18"
     assert proposals(issues) == [(3, "PO Received Date typed as text, read as day/month/year",
@@ -280,7 +298,7 @@ def test_text_dates_are_read_day_first(tmp_path):
 
 def test_swapped_po_date_gets_a_suggestion(tmp_path):
     # factory typed 06/12/2025 on a month-first PC: Excel stored 12 June
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     _, _, issues = date_check(con, tmp_path, rec(ship="2025-12-21", po_received_date=datetime(2025, 6, 12)))
     assert proposals(issues) == [(3, "PO Received Date: day and month look swapped",
                                   date(2025, 12, 6), date(2025, 12, 21))]
@@ -288,7 +306,7 @@ def test_swapped_po_date_gets_a_suggestion(tmp_path):
 
 
 def test_swapped_shipment_date_gets_a_suggestion(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     _, _, issues = date_check(con, tmp_path, rec(ship="2026-02-04", po_received_date=datetime(2026, 3, 20)),
                               rec(ship="2026-12-05"))  # after TODAY
     assert proposals(issues) == [
@@ -297,7 +315,7 @@ def test_swapped_shipment_date_gets_a_suggestion(tmp_path):
 
 
 def test_po_date_without_its_year_gets_the_shipment_year(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     _, _, issues = date_check(con, tmp_path, rec(ship="2026-06-15", po_received_date=datetime(1900, 6, 13)),
                               rec(ship="2026-01-05", po_received_date=datetime(1900, 12, 28)))
     assert proposals(issues) == [
@@ -306,7 +324,7 @@ def test_po_date_without_its_year_gets_the_shipment_year(tmp_path):
 
 
 def test_po_after_shipment_is_listed_without_a_suggestion(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     _, _, issues = date_check(con, tmp_path, rec(ship="2026-04-07", po_received_date=datetime(2026, 4, 18)),
                               rec(ship="2026-04-07", po_received_date=datetime(1900, 6, 13)))
     assert proposals(issues) == [
@@ -315,7 +333,7 @@ def test_po_after_shipment_is_listed_without_a_suggestion(tmp_path):
 
 
 def test_missing_or_bad_shipment_date_is_listed_and_kept(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     files, _, issues = date_check(con, tmp_path, rec(), rec(ship=None, shipment_date="TBC"), rec(ship=None))
     assert proposals(issues) == [
         (4, "Shipment Date is not a date; the row is left out of reports", None, None),
@@ -325,7 +343,7 @@ def test_missing_or_bad_shipment_date_is_listed_and_kept(tmp_path):
 
 
 def test_reviewed_dates_are_imported_and_reused_next_time(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     bad = rec(ship="2025-12-21", po_received_date=datetime(2025, 6, 12))
     files, _, issues = date_check(con, tmp_path, bad, rec())
     core.apply_dates(issues, [(date(2025, 12, 5), date(2025, 12, 20))])  # user's own choice
@@ -347,7 +365,7 @@ def test_reviewed_dates_are_imported_and_reused_next_time(tmp_path):
 
 
 def test_changed_row_is_checked_again(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     files, _, issues = date_check(con, tmp_path, rec(ship="2025-12-21", po_received_date=datetime(2025, 6, 12)))
     core.apply_dates(issues, [(date(2025, 12, 6), date(2025, 12, 21))])
     core.save_many(con, files)
@@ -357,7 +375,7 @@ def test_changed_row_is_checked_again(tmp_path):
 
 
 def test_forgotten_correction_is_checked_again(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     bad = rec(ship="2025-12-21", po_received_date=datetime(2025, 6, 12))
     files, _, issues = date_check(con, tmp_path, bad)
     core.apply_dates(issues, [(date(2025, 12, 6), date(2025, 12, 21))])
@@ -368,19 +386,9 @@ def test_forgotten_correction_is_checked_again(tmp_path):
     assert reused == 0 and len(issues) == 1
 
 
-def test_old_database_gets_the_corrections_table(tmp_path):
-    con = core.connect(tmp_path / "t.db")
-    insert(con, "STD", shipment_date="2026-08-03", carton_qty=1, unit_price=1.0, total_amount=1.0)
-    con.execute("DROP TABLE date_fixes")
-    con.execute("PRAGMA user_version = 1")
-    con.close()
-    con = core.connect(tmp_path / "t.db")
-    assert core.saved_dates(con) == []
-    assert con.execute("SELECT COUNT(*) FROM track_std").fetchone()[0] == 1
-
 
 def test_reimport_replaces_only_overlapping_supplier_months(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     first = make_xlsx(tmp_path / "a.xlsx", std=[rec(sup="A"), rec(sup="A"), rec(sup="B"),
                                                 rec(ship="2026-07-15", sup="A")])
     core.save_many(con, {"a.xlsx": core.read_workbook(first)})
@@ -395,7 +403,7 @@ def test_reimport_replaces_only_overlapping_supplier_months(tmp_path):
 
 
 def test_supplier_spellings_merge(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     spellings = ["M&U Packaging Ltd", "M&U Packaging Ltd", "M&U  Packaging Ltd.", "m&u packaging ltd."]
     data = core.read_workbook(make_xlsx(tmp_path / "a.xlsx", std=[rec(sup=s, qty=10 * i)
                                                                   for i, s in enumerate(spellings, 1)]))
@@ -412,7 +420,7 @@ def test_supplier_spellings_merge(tmp_path):
 
 
 def test_spelling_fixed_on_reimport_replaces_rows(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     old = make_xlsx(tmp_path / "a.xlsx", std=[rec(sup="Uniglory Packging Industries Ltd.")] * 2)
     core.save_many(con, {"a.xlsx": core.read_workbook(old)})
     new = make_xlsx(tmp_path / "b.xlsx", std=[rec(sup="Uniglory Packaging Industries Ltd.")] * 2)
@@ -421,7 +429,7 @@ def test_spelling_fixed_on_reimport_replaces_rows(tmp_path):
 
 
 def test_several_files_import_together(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     files = {
         "a.xlsx": core.read_workbook(make_xlsx(tmp_path / "a.xlsx", std=[rec(sup="Alpha Ltd")] * 2)),
         "b.xlsx": core.read_workbook(make_xlsx(tmp_path / "b.xlsx", std=[rec(sup="Beta Ltd")],
@@ -435,7 +443,7 @@ def test_several_files_import_together(tmp_path):
 
 
 def test_files_with_the_same_supplier_month_clash(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     files = {
         "cumulative.xlsx": core.read_workbook(make_xlsx(tmp_path / "a.xlsx", std=[
             rec(ship="2026-07-10", sup="Alpha Ltd"), rec(sup="Alpha Ltd")])),
@@ -449,7 +457,7 @@ def test_files_with_the_same_supplier_month_clash(tmp_path):
 
 
 def test_failed_batch_leaves_database_unchanged(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     good = core.read_workbook(make_xlsx(tmp_path / "a.xlsx", std=[rec(sup="Alpha Ltd")]))
     broken = {"STD": [{"supplier_key": "BETA", "shipment_date": "2026-08-03"}], "CUS": []}  # missing columns
     with pytest.raises(KeyError):
@@ -466,11 +474,11 @@ SEEDED = [
 
 
 def test_seeded_rates(tmp_path):
-    assert core.get_rates(core.connect(tmp_path / "t.db")) == SEEDED
+    assert core.get_rates(core.connect()) == SEEDED
 
 
 def test_rate_change_applies_to_existing_rows(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "CUS", shipment_date="2026-09-10", carton_qty=100, unit_price=2.0, total_amount=200.0)
     rates = core.get_rates(con)
     rates[-1]["matalan_pct"] = 0.08
@@ -486,7 +494,7 @@ def test_rate_change_applies_to_existing_rows(tmp_path):
     ({"effective_from": "2026-07-01"}, "duplicate"),
 ])
 def test_invalid_rates_are_rejected(tmp_path, change, message):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     rates = core.get_rates(con)
     rates[0].update(change)  # rates[0] is STD 2025-12-01; the duplicate case collides with STD 2026-07-01
     with pytest.raises(ValueError, match=message):
@@ -495,13 +503,13 @@ def test_invalid_rates_are_rejected(tmp_path, change, message):
 
 
 def test_empty_rates_are_rejected(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     with pytest.raises(ValueError, match="At least one"):
         core.save_rates(con, [])
 
 
 def test_rates_that_leave_shipments_unrated_are_rejected(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "STD", shipment_date="2026-01-15", carton_qty=1, unit_price=1.0, total_amount=1.0)
     message = ("1 shipment(s) from 2026-01-15 on would have no rate. "
                "Add a rate that starts on or before 2026-01-15.")
@@ -511,7 +519,7 @@ def test_rates_that_leave_shipments_unrated_are_rejected(tmp_path):
 
 
 def test_unrated_count(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "STD", shipment_date="2025-06-01", carton_qty=1, unit_price=1.0, total_amount=1.0)
     insert(con, "CUS", shipment_date="2026-08-01", carton_qty=1, unit_price=1.0, total_amount=1.0)
     insert(con, "CUS", shipment_date=None, carton_qty=1, unit_price=1.0, total_amount=1.0)
@@ -520,7 +528,7 @@ def test_unrated_count(tmp_path):
 
 @pytest.fixture
 def demo_con(tmp_path):
-    con = core.connect(tmp_path / "demo.db")
+    con = core.connect()
     core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})
     return con
 
@@ -551,7 +559,7 @@ def test_tracker_rows_can_be_manually_edited(demo_con):
     assert core.update_tracker_rows(demo_con, "STD", [row]) == 1
     saved = demo_con.execute(
         "SELECT po_received_date, shipment_date, matalan_po, carton_qty "
-        "FROM track_std WHERE id = ?", (row["id"],)).fetchone()
+        "FROM track_std WHERE id = %s", (row["id"],)).fetchone()
     assert tuple(saved) == ("2026-08-04", "2026-08-09", "PO-CORRECTED", 321)
 
 
@@ -563,13 +571,13 @@ def test_invalid_tracker_edit_rolls_back(demo_con):
     with pytest.raises(ValueError, match="Shipment Date"):
         core.update_tracker_rows(demo_con, "STD", rows)
     after = [r[0] for r in demo_con.execute(
-        "SELECT matalan_po FROM track_std WHERE id IN (?, ?) ORDER BY id",
+        "SELECT matalan_po FROM track_std WHERE id IN (%s, %s) ORDER BY id",
         [r["id"] for r in rows])]
     assert after == before
 
 
 def test_live_summary_rows_match_report_totals(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "STD", shipment_date="2026-08-01", packaging_supplier="Pack Ltd",
            supplier_key="PACK", supplier_name="Supplier A", factory_name="Factory A",
            carton_qty=10, unit_price=2.0, total_amount=20.0)
@@ -637,7 +645,7 @@ def test_summary_xlsx(demo_con):
 
 
 def test_summary_shows_mixed_and_missing_rates(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     for d in ("2026-07-10", "2026-08-10"):
         insert(con, "STD", shipment_date=d, packaging_supplier="A", supplier_key="A", carton_qty=10,
                unit_price=1.0, total_amount=10.0)
@@ -750,9 +758,7 @@ def test_supplier_without_rows_in_selection_is_skipped(demo_con):
 
 def test_app_smoke(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
-    db = tmp_path / "app.db"
-    monkeypatch.setenv("CARTON_DB", str(db))
-    core.save_many(core.connect(db), {DEMO.name: core.read_workbook(DEMO)})
+    core.save_many(core.connect(), {DEMO.name: core.read_workbook(DEMO)})
     at = AppTest.from_file(str(HERE / "pages" / "1_Dashboard.py"), default_timeout=30).run()
     assert not at.exception
     assert [item.value for item in at.subheader] == [
@@ -767,9 +773,7 @@ def test_app_smoke(tmp_path, monkeypatch):
 
 def test_app_builds_reports_for_every_selected_supplier(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
-    db = tmp_path / "app.db"
-    monkeypatch.setenv("CARTON_DB", str(db))
-    core.save_many(core.connect(db), {DEMO.name: core.read_workbook(DEMO)})
+    core.save_many(core.connect(), {DEMO.name: core.read_workbook(DEMO)})
     at = AppTest.from_file(str(HERE / "pages" / "2_Reports.py"), default_timeout=60).run()
     assert at.multiselect[0].options == [TW, UG]
     assert at.multiselect[0].value == [TW_KEY, UG_KEY]
@@ -794,8 +798,6 @@ class FakeUpload:
 def test_app_date_check_imports_and_remembers_suggested_dates(tmp_path, monkeypatch):
     import streamlit as st
     from streamlit.testing.v1 import AppTest
-    db = tmp_path / "app.db"
-    monkeypatch.setenv("CARTON_DB", str(db))
     path = make_xlsx(tmp_path / "a.xlsx", std=[rec(ship="2025-12-21", po_received_date=datetime(2025, 6, 12)), rec()])
     monkeypatch.setattr(st, "file_uploader", lambda *a, **k: [] if k.get("key") == "ebiz_upload" else [FakeUpload(path)])
     at = AppTest.from_file(str(HERE / "pages" / "5_Import.py"), default_timeout=30).run()
@@ -803,7 +805,7 @@ def test_app_date_check_imports_and_remembers_suggested_dates(tmp_path, monkeypa
     assert at.warning[0].value.startswith("1 row(s) have dates that need review.")
     next(b for b in at.button if b.label == "Confirm tracker import").click().run()
     assert not at.exception
-    con = core.connect(db)
+    con = core.connect()
     assert [r[0] for r in con.execute("SELECT po_received_date FROM track_std ORDER BY id")] == ["2025-12-06", None]
     at.run()  # same file still uploaded: the saved correction is used, nothing to review
     assert "1 row(s) used a previously saved date correction." in [i.value for i in at.info]
@@ -813,9 +815,7 @@ def test_app_date_check_imports_and_remembers_suggested_dates(tmp_path, monkeypa
 
 def test_app_no_data_for_selection(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
-    db = tmp_path / "app.db"
-    monkeypatch.setenv("CARTON_DB", str(db))
-    con = core.connect(db)
+    con = core.connect()
     core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})
     # Insert a row for Old Supplier with Q1 2025 data (shipment_date 2025-01-15)
     insert(con, "STD", shipment_date="2025-01-15", packaging_supplier="Old Supplier Ltd.", supplier_key="OLD",
@@ -865,7 +865,7 @@ def test_read_ebiz_skips_vendorless_total_lines(tmp_path):
              "b.xlsx": core.read_ebiz(make_ebiz(tmp_path / "b.xlsx", [erow("2", vendor="Other Co"), total]))}
     assert [r["vendor_key"] for rows in files.values() for r in rows] == ["PACK", "OTHER"]
     assert core.ebiz_clashes(files) == []
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     assert core.replace_ebiz(con, files) == {"a.xlsx": 1, "b.xlsx": 1}
 
 
@@ -886,7 +886,7 @@ def test_ebiz_preview(tmp_path):
 
 
 def test_ebiz_upload_replaces_all_ebiz_data(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     assert core.ebiz_status(con) is None
     a = {"a.xlsx": core.read_ebiz(make_ebiz(tmp_path / "a.xlsx", [erow("1"), erow("2", vendor="Other Co")]))}
     assert core.replace_ebiz(con, a) == {"a.xlsx": 2}
@@ -903,21 +903,11 @@ def test_ebiz_upload_replaces_all_ebiz_data(tmp_path):
     assert core.ebiz_status(con)[0] == 1  # a refused upload keeps the old data
 
 
-def test_old_database_gets_the_ebiz_table(tmp_path):
-    con = core.connect(tmp_path / "t.db")
-    insert(con, "STD", shipment_date="2026-08-03", carton_qty=1, unit_price=1.0, total_amount=1.0)
-    con.execute("DROP TABLE ebiz")
-    con.execute("PRAGMA user_version = 2")
-    con.close()
-    con = core.connect(tmp_path / "t.db")
-    assert core.ebiz_status(con) is None
-    assert con.execute("SELECT COUNT(*) FROM track_std").fetchone()[0] == 1
-
 
 @pytest.fixture
 def xref_con(tmp_path):
     """Supplier PACK: tracker SOs 1001-1004 and rows without an SO#; eBiz rows giving every status."""
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     for so, qty, ship in [("1001", 100, "2026-08-03"), ("1002", 100, "2026-08-04"), ("1003", 50, "2026-08-05"),
                           ("1004", 10, "2026-08-06"), ("1004", 1, None), (None, 5, "2026-08-07"),
                           ("0", 2, "2026-08-08")]:
@@ -1004,8 +994,6 @@ def test_rebate_report_pdf(demo_con):
 ])
 def test_live_report_pages(xref_con, monkeypatch, page_name, expected_control):
     from streamlit.testing.v1 import AppTest
-    database = xref_con.execute("PRAGMA database_list").fetchone()[2]
-    monkeypatch.setenv("CARTON_DB", database)
     at = AppTest.from_file(str(HERE / "pages" / page_name), default_timeout=60).run()
     assert not at.exception
     assert at.selectbox[0].label == "Packaging supplier"
@@ -1015,7 +1003,7 @@ def test_live_report_pages(xref_con, monkeypatch, page_name, expected_control):
 
 
 def test_discrepancy_pdf_says_when_a_section_is_empty(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     insert(con, "STD", shipment_date="2026-08-03", packaging_supplier="Pack A Ltd.", supplier_key="PACK",
            ebiz_so="1001", carton_qty=100, unit_price=1.0, total_amount=100.0)
     core.replace_ebiz(con, {"e.xlsx": core.read_ebiz(make_ebiz(tmp_path / "e.xlsx", [erow("1001", qty=100)]))})
@@ -1026,7 +1014,7 @@ def test_discrepancy_pdf_says_when_a_section_is_empty(tmp_path):
 
 
 def test_discrepancy_pdf_section_bar_never_ends_a_page(tmp_path):
-    con = core.connect(tmp_path / "t.db")
+    con = core.connect()
     for so, qty in [(str(1000 + i), 1) for i in range(42)] + [("9000", 10)]:  # 42 not in eBiz, 1 mismatch
         insert(con, "STD", shipment_date="2026-08-03", packaging_supplier="Pack A Ltd.", supplier_key="PACK",
                ebiz_so=so, carton_qty=qty, unit_price=1.0, total_amount=float(qty))
@@ -1075,7 +1063,7 @@ def test_cross_reference_xlsx(xref_con):
 
 
 def test_build_all_adds_discrepancy_files_for_suppliers_with_ebiz(demo_con, tmp_path):
-    so = demo_con.execute("SELECT ebiz_so FROM track_std WHERE supplier_key = ? AND ebiz_so IS NOT NULL",
+    so = demo_con.execute("SELECT ebiz_so FROM track_std WHERE supplier_key = %s AND ebiz_so IS NOT NULL",
                           (TW_KEY,)).fetchone()[0]
     core.replace_ebiz(demo_con, {"e.xlsx": core.read_ebiz(make_ebiz(tmp_path / "e.xlsx", [erow(so, vendor=TW)]))})
     folder = "Transworld Packaging (BD) Ltd"
@@ -1095,9 +1083,7 @@ def test_build_all_adds_discrepancy_files_for_suppliers_with_ebiz(demo_con, tmp_
 def test_app_replaces_ebiz_data(tmp_path, monkeypatch):
     import streamlit as st
     from streamlit.testing.v1 import AppTest
-    db = tmp_path / "app.db"
-    monkeypatch.setenv("CARTON_DB", str(db))
-    core.save_many(core.connect(db), {DEMO.name: core.read_workbook(DEMO)})
+    core.save_many(core.connect(), {DEMO.name: core.read_workbook(DEMO)})
     path = make_ebiz(tmp_path / "ebiz.xlsx", [erow("1", vendor=TW), erow("2", vendor="Nobody Ltd")])
     monkeypatch.setattr(st, "file_uploader",
                         lambda *a, **k: [FakeUpload(path)] if k.get("key") == "ebiz_upload" else [])
@@ -1106,7 +1092,7 @@ def test_app_replaces_ebiz_data(tmp_path, monkeypatch):
     assert any("NOBODY" in w.value for w in at.warning)  # vendor without tracker rows
     next(b for b in at.button if b.label == "Replace all eBiz data").click().run()
     assert not at.exception
-    assert core.ebiz_status(core.connect(db))[0] == 2
+    assert core.ebiz_status(core.connect())[0] == 2
     report = AppTest.from_file(str(HERE / "pages" / "2_Reports.py"), default_timeout=30).run()
     checkbox = next(c for c in report.checkbox if c.label == "Discrepancy report and cross reference")
     assert checkbox.value and not checkbox.disabled
@@ -1116,9 +1102,7 @@ def test_app_replaces_ebiz_data(tmp_path, monkeypatch):
 def test_app_warns_which_vendors_a_replace_drops(tmp_path, monkeypatch):
     import streamlit as st
     from streamlit.testing.v1 import AppTest
-    db = tmp_path / "app.db"
-    monkeypatch.setenv("CARTON_DB", str(db))
-    con = core.connect(db)
+    con = core.connect()
     core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})
     old = {name: core.read_ebiz(make_ebiz(tmp_path / name, [erow("1", vendor=v)]))
            for name, v in [("tw.xlsx", TW), ("other.xlsx", "Other Co"), ("nobody.xlsx", "Nobody Ltd")]}
