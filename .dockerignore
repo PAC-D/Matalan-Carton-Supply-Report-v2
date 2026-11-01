@@ -4,6 +4,7 @@
 __pycache__
 *.pyc
 carton.db
+certs
 data
 Reports
 samples
