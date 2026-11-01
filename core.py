@@ -326,7 +326,7 @@ def _month(row):
     return row["shipment_date"][:7] if row["shipment_date"] else None
 
 
-_SAME_KEY = "supplier_key IS ? AND substr(shipment_date, 1, 7) IS ?"
+_SAME_KEY = "supplier_key IS NOT DISTINCT FROM %s AND substr(shipment_date, 1, 7) IS NOT DISTINCT FROM %s"
 
 
 def preview(con, data):
@@ -469,13 +469,13 @@ def saved_dates(con):
              "PO Received Date in file": r["file_po"], "Shipment Date in file": r["file_ship"],
              "PO Received Date": shown(r["po_received_date"]), "Shipment Date": shown(r["shipment_date"]),
              "Saved at": r["saved_at"].replace("T", " ")[:16], "key": r["row_key"]}
-            for r in con.execute("SELECT * FROM date_fixes ORDER BY saved_at DESC, rowid")]
+            for r in con.execute("SELECT * FROM date_fixes ORDER BY saved_at DESC, row_key")]
 
 
 def forget_dates(con, keys):
     """Delete saved corrections; those rows are checked again the next time they are imported."""
-    with con:
-        con.executemany("DELETE FROM date_fixes WHERE row_key = ?", [(k,) for k in keys])
+    with con.transaction():
+        con.cursor().executemany("DELETE FROM date_fixes WHERE row_key = %s", [(k,) for k in keys])
 
 
 def clashes(files):
@@ -488,6 +488,12 @@ def clashes(files):
     return [{"Sheet": SHEETS[kind], "Supplier": supplier, "Shipment month": month or "no valid date",
              "Files": " / ".join(names)}
             for (kind, supplier, month), names in sorted(seen.items(), key=str) if len(names) > 1]
+
+
+_FIX_COLS = ["row_key", "carton_type", "packaging_supplier", "ebiz_so", "carton_qty", "file_po", "file_ship",
+             "po_received_date", "shipment_date", "saved_at"]
+_SAVE_FIX = (f"INSERT INTO date_fixes VALUES ({', '.join(['%s'] * len(_FIX_COLS))}) ON CONFLICT (row_key) DO UPDATE SET "
+             + ", ".join(f"{c} = EXCLUDED.{c}" for c in _FIX_COLS[1:]))
 
 
 def save_many(con, files):
@@ -503,15 +509,16 @@ def save_many(con, files):
             f"{c['Sheet']} {c['Supplier']} {c['Shipment month']} in {c['Files']}" for c in clash))
     now = datetime.now().isoformat(timespec="seconds")
     cols = COLUMNS + ["supplier_key", "source_file", "imported_at"]
-    with con:
+    with con.transaction():
+        cur = con.cursor()
         for name, data in files.items():
             for kind, rows in data.items():
                 table = TABLES[kind]
                 for key in {(r["supplier_key"], _month(r)) for r in rows}:
                     con.execute(f"DELETE FROM {table} WHERE {_SAME_KEY}", key)
-                con.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                cur.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
                                 [[r[c] for c in COLUMNS] + [r["supplier_key"], name, now] for r in rows])
-                con.executemany("INSERT OR REPLACE INTO date_fixes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                cur.executemany(_SAVE_FIX,
                                 [(r["_key"], kind, r["packaging_supplier"], r["ebiz_so"], r["carton_qty"],
                                   _shown(r["_file"]["po_received_date"]), _shown(r["_file"]["shipment_date"]),
                                   r["po_received_date"], r["shipment_date"], now)
@@ -601,10 +608,10 @@ def replace_ebiz(con, files):
         raise ValueError("Files overlap: " + "; ".join(f"{c['Vendor']} in {c['Files']}" for c in clash))
     now = datetime.now().isoformat(timespec="seconds")
     cols = EBIZ_COLUMNS + ["source_file", "imported_at"]
-    with con:
+    with con.transaction():
         con.execute("DELETE FROM ebiz")
         for name, rows in files.items():
-            con.executemany(f"INSERT INTO ebiz ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            con.cursor().executemany(f"INSERT INTO ebiz ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
                             [[r[c] for c in EBIZ_COLUMNS] + [name, now] for r in rows])
     return {name: len(rows) for name, rows in files.items()}
 

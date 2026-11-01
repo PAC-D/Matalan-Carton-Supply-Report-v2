@@ -209,6 +209,17 @@ def test_demo_import_counts_and_totals(tmp_path):
     assert con.execute("SELECT COUNT(*) FROM track_cus").fetchone()[0] == 118
 
 
+def test_supplier_names_with_quotes_and_percent_import_safely(tmp_path):
+    con = core.connect()
+    name = "M&U 100% O'Neil Pack Ltd."
+    make_xlsx(tmp_path / "q.xlsx", std=[rec(sup=name)])
+    data = core.read_workbook(tmp_path / "q.xlsx")
+    assert core.preview(con, data)[0]["Supplier"] == "M&U"
+    core.save_many(con, {"q.xlsx": data})
+    row = con.execute("SELECT packaging_supplier, supplier_key FROM track_std").fetchone()
+    assert tuple(row) == (name, "M&U")
+
+
 def test_template_rows_are_skipped(tmp_path):
     path = make_xlsx(tmp_path / "a.xlsx", std=[rec(), {"carton_selection": "Custom", "flute": "BC-Flute"}])
     assert len(core.read_workbook(path)["STD"]) == 1
