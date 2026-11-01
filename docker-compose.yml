@@ -5,7 +5,7 @@ services:
     container_name: matalan-carton-report
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:8502:8501"  # host 8501 belongs to the Primark allocation app
     env_file: .env
     volumes:
       - ./Reports:/app/Reports

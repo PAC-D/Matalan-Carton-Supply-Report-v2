@@ -91,7 +91,8 @@ On the server, the app lives in `/opt/matalan-carton`:
 - `.env` (mode 600, never committed) holds `DATABASE_URL`; see `.env.example`.
 - `certs/global-bundle.pem` is the RDS CA bundle used for `sslmode=verify-full`:
   `curl -fsSo certs/global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem`
-- The container listens on `127.0.0.1:8501` only. Host nginx serves it over
+- The container is published on `127.0.0.1:8502` only (8501 is the Primark
+  allocation app). Host nginx serves it over
   HTTPS with basic auth, using the locations in
   `deploy/nginx-matalan-carton-report.conf` and the password file
   `/etc/nginx/.htpasswd-carton-supply-report`.
