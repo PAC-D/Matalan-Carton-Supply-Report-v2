@@ -177,7 +177,24 @@ but it does not embed copies of the original Excel workbooks. Keep those
 workbooks separately if the source files must also be retained.
 
 For multiple app containers or sustained concurrent editing, migrate the
-persistence layer to PostgreSQL before scaling.
+persistence layer to PostgreSQL and add application authentication/roles
+before scaling.
+
+## Design decisions
+
+- Streamlit, because the Primark reference implementation uses it and the
+  Python report engine is mature and tested.
+- Tracker edits are transactional; report-only fields are recalculated by the
+  database views and cannot be edited.
+- The Dashboard and Summary workbook share `core.summary_rows`; the live Cross
+  Reference, Discrepancy and Rebate pages share their aggregations and views
+  with the generated reports, so live and printed totals always agree.
+
+## Open deployment inputs
+
+- Final hostname, and whether the app is served at a domain root or URL prefix.
+- Authentication method (nginx basic auth, SSO, or application accounts).
+- Backup destination and retention for the Docker `carton-data` volume.
 
 ## Testing
 
@@ -201,7 +218,6 @@ assets/             PACD and Matalan logos
 Dockerfile          Hosted application image
 docker-compose.yml  Persistent single-instance deployment
 deploy/             Reverse-proxy configuration
-CODEX.md            Architecture decisions and future deployment inputs
 check.py            Automated test suite
 ```
 

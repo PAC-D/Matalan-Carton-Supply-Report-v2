@@ -176,6 +176,9 @@ def _clean(value):
     return value
 
 
+_PUNCT_TO_SPACE = str.maketrans('.,;:"\'!?', " " * 8)
+
+
 def supplier_key(name):
     """Upper-cased first word of a packaging supplier name, so its spellings merge (port of the VBA FirstWord).
 
@@ -183,9 +186,7 @@ def supplier_key(name):
     """
     if name is None:
         return None
-    for ch in '.,;:"\'!?':
-        name = name.replace(ch, " ")
-    words = name.split()
+    words = name.translate(_PUNCT_TO_SPACE).split()
     return words[0].upper() if words else None
 
 
@@ -240,18 +241,29 @@ def _row_key(kind, raw, row):
     return hashlib.sha1(json.dumps(ident).encode()).hexdigest()
 
 
+def _open(src):
+    try:
+        return openpyxl.load_workbook(src, data_only=True)
+    except Exception as e:  # not an xlsx, corrupt or password protected
+        raise ImportFileError(f"Can't open the workbook: {e}") from e
+
+
+def _header_row(ws, marker, where):
+    """({normalised header: column index}, row number) of the first of rows 1-10 with a `marker` cell."""
+    for n, header_row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
+        found = {_norm(h): i for i, h in enumerate(header_row)}
+        if _norm(marker) in found:
+            return found, n
+    raise ImportFileError(f"{where} header row not found (no '{marker}' cell in rows 1-10).")
+
+
 def _find_columns(sheet, ws):
     """Return (column index per COLUMNS, header row number).
 
     The header row is the first of rows 1-10 with a 'Shipment Date' cell: row 2 in the
     master tracker (title above), row 1 in the per-supplier exports.
     """
-    for n, header_row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
-        found = {_norm(h): i for i, h in enumerate(header_row)}
-        if _norm(HEADERS["shipment_date"]) in found:
-            break
-    else:
-        raise ImportFileError(f"{sheet}: header row not found (no 'Shipment Date' cell in rows 1-10).")
+    found, n = _header_row(ws, HEADERS["shipment_date"], f"{sheet}:")
     index = {}
     for col in COLUMNS:
         index[col] = found.get(_norm(HEADERS[col]))
@@ -269,10 +281,7 @@ def read_workbook(src):
     "_row" (Excel row number), "_file" (the two date cells as they are in the file) and
     "_key" (identifies the row in later imports, for saved date corrections).
     """
-    try:
-        wb = openpyxl.load_workbook(src, data_only=True)
-    except Exception as e:  # not an xlsx, corrupt or password protected
-        raise ImportFileError(f"Can't open the workbook: {e}") from e
+    wb = _open(src)
     names = {n.upper(): n for n in wb.sheetnames}
     for sheet in SHEETS.values():
         if sheet not in names:
@@ -467,11 +476,6 @@ def clashes(files):
             for (kind, supplier, month), names in sorted(seen.items(), key=str) if len(names) > 1]
 
 
-def save(con, data, source_file):
-    """Import one file. Returns the number of rows inserted per sheet."""
-    return save_many(con, {source_file: data})[source_file]
-
-
 def save_many(con, files):
     """Import several files in one transaction: all of them load, or none do.
 
@@ -526,17 +530,8 @@ def read_ebiz(src):
     Order Number "A|B" gives so_1 "A" and so_2 "B"; vendor_key is supplier_key(vendor). Blank rows and rows
     with no Vendor (total lines) are skipped.
     """
-    try:
-        wb = openpyxl.load_workbook(src, data_only=True)
-    except Exception as e:  # not an xlsx, corrupt or password protected
-        raise ImportFileError(f"Can't open the workbook: {e}") from e
-    ws = wb.worksheets[0]
-    for n, header_row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
-        found = {_norm(h): i for i, h in enumerate(header_row)}
-        if _norm(EBIZ_HEADERS["order_number"]) in found:
-            break
-    else:
-        raise ImportFileError("eBiz header row not found (no 'Order Number' cell in rows 1-10).")
+    ws = _open(src).worksheets[0]
+    found, n = _header_row(ws, EBIZ_HEADERS["order_number"], "eBiz")
     index = {c: found.get(_norm(h)) for c, h in EBIZ_HEADERS.items()}
     for col in EBIZ_REQUIRED:
         if index[col] is None:
@@ -860,28 +855,15 @@ def update_tracker_rows(con, kind, edited):
             value = _clean(item.get(col))
             if col in DATE_COLS:
                 value = _manual_date(value, number, HEADERS[col])
-            elif col in INT_COLS:
-                if value is None or value == "":
-                    value = None
-                else:
-                    try:
-                        value = int(round(float(value)))
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            f"Row {number}: {HEADERS[col]} must be a number.") from None
-            elif col in REAL_COLS:
-                if value is None or value == "":
-                    value = None
-                else:
-                    try:
-                        value = float(value)
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            f"Row {number}: {HEADERS[col]} must be a number.") from None
+            elif value is None:
+                pass
+            elif col in INT_COLS or col in REAL_COLS:
+                try:
+                    value = int(round(float(value))) if col in INT_COLS else float(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Row {number}: {HEADERS[col]} must be a number.") from None
             else:
-                value = _clean(value)
-                if value is not None:
-                    value = str(value)
+                value = str(value)
             values.append(value)
         key = supplier_key(values[COLUMNS.index("packaging_supplier")])
         prepared.append(values + [key, row_id])
@@ -935,9 +917,8 @@ def summary_rows(con, fiscal_year, supplier=None):
 
 def cross_reference_overview(con):
     """One live Tracker-vs-eBiz status summary per packaging supplier."""
-    keys = sorted(set(tracker_suppliers(con)) | set(ebiz_vendors(con)))
     overview = []
-    for key in keys:
+    for key in reconciliation_suppliers(con):
         data = cross_reference(con, key)
         statuses = {label: 0 for label in ("Match", "Not in eBiz", "Tracker > eBiz", "Tracker < eBiz")}
         for order in data["orders"]:
@@ -969,6 +950,11 @@ def tracker_suppliers(con):
     return [r[0] for r in con.execute(f"SELECT supplier_key FROM ({sql}) ORDER BY 1")]
 
 
+def reconciliation_suppliers(con):
+    """Supplier keys found in the tracker or in eBiz, sorted."""
+    return sorted(set(tracker_suppliers(con)) | set(ebiz_vendors(con)))
+
+
 def supplier_name(con, key):
     """Most common Tracker supplier spelling, then eBiz vendor spelling, else the key."""
     src = " UNION ALL ".join(
@@ -986,8 +972,8 @@ def supplier_name(con, key):
     return row[0] if row else key
 
 
-def fiscal_years(con):
-    src, params = _dated()
+def fiscal_years(con, **filters):
+    src, params = _dated(**filters)
     return [r[0] for r in con.execute(f"SELECT DISTINCT fiscal_year FROM {src} ORDER BY 1", params)]
 
 

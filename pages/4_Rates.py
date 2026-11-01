@@ -2,12 +2,12 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import header, page
+from web_ui import clear_built_reports, header, page
 
 RATE_COLS = ["carton_type", "effective_from", "pacd_pct", "matalan_pct"]
 
 
-@page("Rates")
+@page
 def main():
     con = core.connect()
     rates = core.get_rates(con)
@@ -38,7 +38,7 @@ def main():
         except (ValueError, TypeError) as exc:
             st.error(str(exc))
         else:
-            st.session_state.pop("built_reports", None)
+            clear_built_reports()
             st.toast("Rates saved", icon=":material/check_circle:")
 
 

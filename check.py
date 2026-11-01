@@ -40,7 +40,7 @@ def test_shared_chrome_reserves_header_space_and_renders_floating_chip(monkeypat
     assert "data:image/png;base64" in rendered[0]
     assert "height: 68px" in web_ui.THEME
     assert ".mc-footer-chip { position: fixed !important" in web_ui.THEME
-    assert "position:fixed!important;right:12px!important;bottom:10px!important" in rendered[1]
+    assert "class='mc-footer-chip'" in rendered[1]
     assert f"&copy; {date.today().year} PACD" in rendered[1]
     assert "Developed by" in rendered[1]
     assert "https://github.com/RecurSID" in rendered[1]
@@ -177,7 +177,7 @@ def test_demo_import_counts_and_totals(tmp_path):
     con = core.connect(tmp_path / "t.db")
     data = core.read_workbook(DEMO)
     assert {k: len(v) for k, v in data.items()} == {"STD": 88, "CUS": 118}
-    assert core.save(con, data, DEMO.name) == {"STD": 88, "CUS": 118}
+    assert core.save_many(con, {DEMO.name: data})[DEMO.name] == {"STD": 88, "CUS": 118}
 
     def sums(view):
         return tuple(con.execute(f"SELECT SUM(carton_qty), SUM(total_amount), SUM(pacd), "
@@ -186,7 +186,7 @@ def test_demo_import_counts_and_totals(tmp_path):
     assert sums("v_std") == pytest.approx((28001, 33646.9152, 1278.5828, 1682.3458), abs=1e-3)
     assert sums("v_cus") == pytest.approx((41529, 37815.6551, 2694.3654, 1890.7828), abs=1e-3)
 
-    core.save(con, core.read_workbook(DEMO), DEMO.name)  # importing again replaces, not duplicates
+    core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})  # importing again replaces, not duplicates
     assert con.execute("SELECT COUNT(*) FROM track_std").fetchone()[0] == 88
     assert con.execute("SELECT COUNT(*) FROM track_cus").fetchone()[0] == 118
 
@@ -383,12 +383,12 @@ def test_reimport_replaces_only_overlapping_supplier_months(tmp_path):
     con = core.connect(tmp_path / "t.db")
     first = make_xlsx(tmp_path / "a.xlsx", std=[rec(sup="A"), rec(sup="A"), rec(sup="B"),
                                                 rec(ship="2026-07-15", sup="A")])
-    core.save(con, core.read_workbook(first), "a.xlsx")
+    core.save_many(con, {"a.xlsx": core.read_workbook(first)})
     second = core.read_workbook(make_xlsx(tmp_path / "b.xlsx", std=[rec(sup="A", qty=5)]))
     assert core.preview(con, second) == [{"Sheet": "TRACK_STD", "Supplier": "A", "Spellings in file": "A",
                                           "Shipment month": "2026-08", "Rows in file": 1,
                                           "Rows replaced in DB": 2}]
-    core.save(con, second, "b.xlsx")
+    core.save_many(con, {"b.xlsx": second})
     got = sorted((r["packaging_supplier"], r["shipment_date"], r["carton_qty"])
                  for r in con.execute("SELECT * FROM track_std"))
     assert got == [("A", "2026-07-15", 100), ("A", "2026-08-03", 5), ("B", "2026-08-03", 100)]
@@ -403,7 +403,7 @@ def test_supplier_spellings_merge(tmp_path):
         "Sheet": "TRACK_STD", "Supplier": "M&U",
         "Spellings in file": "M&U  Packaging Ltd. / M&U Packaging Ltd / m&u packaging ltd.",
         "Shipment month": "2026-08", "Rows in file": 4, "Rows replaced in DB": 0}]
-    core.save(con, data, "a.xlsx")
+    core.save_many(con, {"a.xlsx": data})
     assert core.suppliers(con) == ["M&U"]
     assert core.supplier_name(con, "M&U") == "M&U Packaging Ltd"
     _, rows = summary_sheet(reports.summary_xlsx(con, 2026)[1])
@@ -414,9 +414,9 @@ def test_supplier_spellings_merge(tmp_path):
 def test_spelling_fixed_on_reimport_replaces_rows(tmp_path):
     con = core.connect(tmp_path / "t.db")
     old = make_xlsx(tmp_path / "a.xlsx", std=[rec(sup="Uniglory Packging Industries Ltd.")] * 2)
-    core.save(con, core.read_workbook(old), "a.xlsx")
+    core.save_many(con, {"a.xlsx": core.read_workbook(old)})
     new = make_xlsx(tmp_path / "b.xlsx", std=[rec(sup="Uniglory Packaging Industries Ltd.")] * 2)
-    core.save(con, core.read_workbook(new), "b.xlsx")
+    core.save_many(con, {"b.xlsx": core.read_workbook(new)})
     assert [r[0] for r in con.execute("SELECT packaging_supplier FROM track_std")] == [UG] * 2
 
 
@@ -521,7 +521,7 @@ def test_unrated_count(tmp_path):
 @pytest.fixture
 def demo_con(tmp_path):
     con = core.connect(tmp_path / "demo.db")
-    core.save(con, core.read_workbook(DEMO), DEMO.name)
+    core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})
     return con
 
 
@@ -752,7 +752,7 @@ def test_app_smoke(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
     db = tmp_path / "app.db"
     monkeypatch.setenv("CARTON_DB", str(db))
-    core.save(core.connect(db), core.read_workbook(DEMO), DEMO.name)
+    core.save_many(core.connect(db), {DEMO.name: core.read_workbook(DEMO)})
     at = AppTest.from_file(str(HERE / "pages" / "1_Dashboard.py"), default_timeout=30).run()
     assert not at.exception
     assert [item.value for item in at.subheader] == [
@@ -769,7 +769,7 @@ def test_app_builds_reports_for_every_selected_supplier(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
     db = tmp_path / "app.db"
     monkeypatch.setenv("CARTON_DB", str(db))
-    core.save(core.connect(db), core.read_workbook(DEMO), DEMO.name)
+    core.save_many(core.connect(db), {DEMO.name: core.read_workbook(DEMO)})
     at = AppTest.from_file(str(HERE / "pages" / "2_Reports.py"), default_timeout=60).run()
     assert at.multiselect[0].options == [TW, UG]
     assert at.multiselect[0].value == [TW_KEY, UG_KEY]
@@ -816,7 +816,7 @@ def test_app_no_data_for_selection(tmp_path, monkeypatch):
     db = tmp_path / "app.db"
     monkeypatch.setenv("CARTON_DB", str(db))
     con = core.connect(db)
-    core.save(con, core.read_workbook(DEMO), DEMO.name)
+    core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})
     # Insert a row for Old Supplier with Q1 2025 data (shipment_date 2025-01-15)
     insert(con, "STD", shipment_date="2025-01-15", packaging_supplier="Old Supplier Ltd.", supplier_key="OLD",
            carton_qty=100, unit_price=1.0, total_amount=100.0)
@@ -1097,7 +1097,7 @@ def test_app_replaces_ebiz_data(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
     db = tmp_path / "app.db"
     monkeypatch.setenv("CARTON_DB", str(db))
-    core.save(core.connect(db), core.read_workbook(DEMO), DEMO.name)
+    core.save_many(core.connect(db), {DEMO.name: core.read_workbook(DEMO)})
     path = make_ebiz(tmp_path / "ebiz.xlsx", [erow("1", vendor=TW), erow("2", vendor="Nobody Ltd")])
     monkeypatch.setattr(st, "file_uploader",
                         lambda *a, **k: [FakeUpload(path)] if k.get("key") == "ebiz_upload" else [])
@@ -1119,7 +1119,7 @@ def test_app_warns_which_vendors_a_replace_drops(tmp_path, monkeypatch):
     db = tmp_path / "app.db"
     monkeypatch.setenv("CARTON_DB", str(db))
     con = core.connect(db)
-    core.save(con, core.read_workbook(DEMO), DEMO.name)
+    core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})
     old = {name: core.read_ebiz(make_ebiz(tmp_path / name, [erow("1", vendor=v)]))
            for name, v in [("tw.xlsx", TW), ("other.xlsx", "Other Co"), ("nobody.xlsx", "Nobody Ltd")]}
     core.replace_ebiz(con, old)

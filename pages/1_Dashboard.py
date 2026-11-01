@@ -173,7 +173,7 @@ def live_summary():
     cross_reference_section(con, selected)
 
 
-@page("Dashboard")
+@page
 def main():
     con = core.connect()
     years = core.fiscal_years(con)

@@ -7,7 +7,7 @@
 | **Status** | In development |
 | **Last updated** | 2026-10-22 |
 | **Owner** | PAC-D |
-| **Source** | `docs/superpowers/specs/2026-10-07-carton-tracker-design.md`, `docs/superpowers/specs/2026-10-08-ebiz-discrepancy-design.md` |
+| **Source** | Original design specs, in Git history before the docs cleanup (`docs/superpowers/specs/`) |
 
 ## 1. Purpose
 

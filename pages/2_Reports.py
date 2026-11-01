@@ -77,7 +77,7 @@ def report_controls():
                                            icon=":material/download:")
 
 
-@page("Build reports")
+@page
 def main():
     con = core.connect()
     suppliers = core.suppliers(con)

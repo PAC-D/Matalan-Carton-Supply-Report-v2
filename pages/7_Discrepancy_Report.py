@@ -50,10 +50,10 @@ def show_tracker_rows(frame, key):
     )
 
 
-@page("Discrepancy report")
+@page
 def main():
     con = core.connect()
-    suppliers = sorted(set(core.tracker_suppliers(con)) | set(core.ebiz_vendors(con)))
+    suppliers = core.reconciliation_suppliers(con)
     status = core.ebiz_status(con)
     header(
         "Discrepancy report",
@@ -125,14 +125,7 @@ def main():
         else:
             st.info("No discrepancies found.")
 
-    tracker_rows = [row for rows in xref["rows"].values() for row in rows]
-    tracker_revision = max((row["imported_at"] or "" for row in tracker_rows), default="")
-    tracker_totals = (
-        sum(row["carton_qty"] or 0 for row in tracker_rows),
-        round(sum((row["pacd"] or 0) + (row["matalan_rebate"] or 0)
-                  for row in tracker_rows), 2),
-    )
-    build_key = (supplier, status[2] if status else None, tracker_revision, tracker_totals)
+    build_key = supplier
     if st.button("Prepare Discrepancy Report PDF", icon=":material/picture_as_pdf:"):
         with st.spinner("Building PDF..."):
             st.session_state["live_discrepancy_pdf"] = (

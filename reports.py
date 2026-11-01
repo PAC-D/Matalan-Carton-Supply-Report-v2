@@ -79,11 +79,12 @@ HEADERS_ALIGN = [Alignment(horizontal=h, vertical="center", wrap_text=True, inde
 NOTE =Alignment(horizontal="left", vertical="top", wrap_text=True)
 
 
+_BAD_FILENAME_CHARS = str.maketrans("", "", '\\/:*?"<>|')
+
+
 def safe_name(s):
     """Text usable in a Windows file or folder name."""
-    for ch in '\\/:*?"<>|':
-        s = s.replace(ch, "")
-    return s.strip().rstrip(". ") or "Unknown"
+    return s.translate(_BAD_FILENAME_CHARS).strip().rstrip(". ") or "Unknown"
 
 
 def _headers(rows, cols):

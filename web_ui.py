@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import functools
 import html
-import traceback
 from datetime import date
 from pathlib import Path
 
@@ -103,7 +102,7 @@ h1, h2, h3, h4 { color: var(--mc-navy); letter-spacing: -.015em; }
 [data-testid="stFileUploaderDropzone"] { background: var(--mc-surface); }
 [data-testid="stAlert"] { border-radius: 10px; }
 .mc-footer-chip { position: fixed !important; right: 12px !important; bottom: 10px !important;
-  z-index: 1000000;
+  z-index: 1000000; display: inline-flex; align-items: center; margin: 0 !important;
   padding: .42rem .75rem; border: 1px solid rgba(226,232,240,.95); border-radius: 999px;
   background: rgba(255,255,255,.94); box-shadow: 0 4px 14px rgba(15,27,45,.10);
   backdrop-filter: blur(10px); white-space: nowrap; text-align: center; width: auto !important;
@@ -151,30 +150,13 @@ def apply_theme() -> None:
     st.html(f"<style>{css}</style>")
 
 
-def _footer_chip_html() -> str:
-    year = date.today().year
-    chip_style = (
-        "position:fixed!important;right:12px!important;bottom:10px!important;"
-        "z-index:1000000!important;display:inline-flex!important;align-items:center!important;"
-        "width:auto!important;margin:0!important;padding:7px 12px!important;"
-        "border:1px solid #e2e8f0!important;border-radius:999px!important;"
-        "background:rgba(255,255,255,.96)!important;box-shadow:0 4px 14px rgba(15,27,45,.10)!important;"
-        "white-space:nowrap!important;font-size:11.5px!important;line-height:1!important;color:#7c8ca3!important"
-    )
-    return (
-        f"<div class='mc-footer-chip' style='{chip_style}'>&copy; {year} PACD&nbsp; | &nbsp;Developed by&nbsp;"
-        "<a href='https://github.com/RecurSID' target='_blank' "
-        "rel='noopener noreferrer' style='color:#002b61;font-weight:700;text-decoration:none'>"
-        "recurSID</a></div>"
-    )
-
-
 def app_chrome() -> None:
     """Render stable app chrome before the selected page does any work."""
     apply_theme()
     st.html(
         "<div class='mc-topbrand-spacer' aria-hidden='true'></div>"
-        f"{_footer_chip_html()}"
+        f"<div class='mc-footer-chip'>&copy; {date.today().year} PACD&nbsp; | &nbsp;Developed by&nbsp;"
+        "<a href='https://github.com/RecurSID' target='_blank' rel='noopener noreferrer'>recurSID</a></div>"
     )
 
 
@@ -207,18 +189,21 @@ def kpi_grid(tiles: list[dict]) -> None:
             + "".join(cards) + "</div>")
 
 
-def page(title: str, description: str | None = None):
+def clear_built_reports() -> None:
+    """Drop prepared downloads after the data behind them changes."""
+    for key in ("built_reports", "live_discrepancy_pdf", "live_rebate_pdf"):
+        st.session_state.pop(key, None)
+
+
+def page(fn):
     """Replace raw page exceptions with a useful panel."""
-    def decorate(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            try:
-                result = fn(*args, **kwargs)
-                return result
-            except Exception as exc:
-                st.error("This page could not be loaded. Try again, then contact support if it continues.")
-                with st.expander("Technical details"):
-                    st.code(f"{exc}\n\n{traceback.format_exc()}", language="text")
-                st.stop()
-        return wrapper
-    return decorate
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            st.error("This page could not be loaded. Try again, then contact support if it continues.")
+            with st.expander("Technical details"):
+                st.exception(exc)
+            st.stop()
+    return wrapper

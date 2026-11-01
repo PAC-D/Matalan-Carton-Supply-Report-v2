@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import header, page
+from web_ui import clear_built_reports, header, page
 
 DATE_EDITS = {
     "PO Received Date": "PO Received Date to import",
@@ -74,7 +74,7 @@ def tracker_import(con):
             if st.button("Confirm tracker import", type="primary", disabled=bool(clash),
                          icon=":material/upload:"):
                 counts = core.save_many(con, files)
-                st.session_state.pop("built_reports", None)
+                clear_built_reports()
                 total = sum(sum(c.values()) for c in counts.values())
                 st.toast(f"Imported {total:,} tracker rows", icon=":material/check_circle:")
                 if core.unrated_count(con):
@@ -129,16 +129,15 @@ def ebiz_import(con):
         if st.button("Replace all eBiz data", type="primary", disabled=bool(clash),
                      icon=":material/sync:"):
             counts = core.replace_ebiz(con, files)
-            st.session_state.pop("built_reports", None)
+            clear_built_reports()
             st.toast(f"Loaded {sum(counts.values()):,} eBiz rows", icon=":material/check_circle:")
             st.rerun()
 
 
-@page("Data import")
+@page
 def main():
     con = core.connect()
-    tracker_count = sum(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                        for table in core.TABLES.values())
+    tracker_count = sum(core.editable_row_count(con, kind) for kind in core.TABLES)
     header("Data import", "Validate and import tracker workbooks and eBiz vendor exports.",
            "Tracker rows", f"{tracker_count:,}")
     tracker_import(con)

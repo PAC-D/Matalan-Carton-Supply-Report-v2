@@ -15,7 +15,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Editable tracker page for all imported `TRACK_STD` and `TRACK_CUS` source fields, with supplier filters and 250-row pagination.
 - Transactional tracker-edit validation, including manual `YYYY-MM-DD` and `DD/MM/YYYY` dates and recalculation of supplier keys.
 - Dockerfile, Docker Compose persistence, health check, and nginx reverse-proxy template for hosted deployment.
-- `CODEX.md` architecture and deployment handoff log.
 
 ### Changed
 

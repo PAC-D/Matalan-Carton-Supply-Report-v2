@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import header, page
+from web_ui import clear_built_reports, header, page
 
 PAGE_SIZE = 250
 
@@ -13,12 +13,11 @@ def same_value(left, right):
     return left_missing and right_missing if left_missing or right_missing else left == right
 
 
-@page("Tracker data")
+@page
 def main():
     con = core.connect()
     suppliers = core.tracker_suppliers(con)
-    total = sum(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in core.TABLES.values())
+    total = sum(core.editable_row_count(con, kind) for kind in core.TABLES)
     header("Tracker data",
            "Review and manually correct imported tracker values. Report calculations update immediately.",
            "Stored rows", f"{total:,}")
@@ -87,6 +86,7 @@ def main():
         except ValueError as exc:
             st.error(str(exc))
         else:
+            clear_built_reports()
             st.toast(f"Saved {count:,} tracker rows", icon=":material/check_circle:")
             st.rerun()
 

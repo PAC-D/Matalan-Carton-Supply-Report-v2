@@ -20,10 +20,8 @@ def rebate_frame(rows):
         "pacd": "PACD",
         "matalan_rebate": "Matalan rebate",
     })
-    frame["PACD rate"] = frame["PACD rate"].map(
-        lambda value: f"{value * 100:g}%" if pd.notna(value) else "-")
-    frame["Rebate rate"] = frame["Rebate rate"].map(
-        lambda value: f"{value * 100:g}%" if pd.notna(value) else "-")
+    rates = ["PACD rate", "Rebate rate"]
+    frame[rates] = frame[rates].map(lambda value: f"{value * 100:g}%" if pd.notna(value) else "-")
     return frame
 
 
@@ -44,7 +42,7 @@ def show_rebate_rows(frame, key):
     )
 
 
-@page("Rebate report")
+@page
 def main():
     con = core.connect()
     suppliers = core.suppliers(con)
@@ -64,11 +62,7 @@ def main():
             format_func=lambda key: core.supplier_name(con, key),
             key="rebate_supplier",
         )
-        years = sorted({row[0] for row in con.execute(
-            "SELECT DISTINCT fiscal_year FROM ("
-            "SELECT fiscal_year, supplier_key FROM v_std UNION ALL "
-            "SELECT fiscal_year, supplier_key FROM v_cus) "
-            "WHERE supplier_key = ? AND fiscal_year IS NOT NULL", (supplier,))})
+        years = core.fiscal_years(con, supplier=supplier)
         year = st.selectbox("Fiscal year", years, index=len(years) - 1, key="rebate_year")
         available = core.quarters(con, supplier=supplier, fiscal_year=year)
         quarters = st.pills(
@@ -103,9 +97,7 @@ def main():
     with custom_tab:
         show_rebate_rows(rebate_frame(custom), "rebate_custom")
 
-    tracker_revision = max((row["imported_at"] or "" for row in all_rows), default="")
-    build_key = (supplier, year, tuple(sorted(quarters)), tracker_revision,
-                 len(all_rows), total_qty, round(total_amount, 2), round(pacd + rebate, 2))
+    build_key = (supplier, year, tuple(sorted(quarters)))
     if st.button("Prepare Rebate Report PDF", icon=":material/picture_as_pdf:"):
         with st.spinner("Building PDF..."):
             st.session_state["live_rebate_pdf"] = (

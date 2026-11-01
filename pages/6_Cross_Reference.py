@@ -6,14 +6,10 @@ import reports
 from web_ui import header, kpi_grid, page
 
 
-def reconciliation_suppliers(con):
-    return sorted(set(core.tracker_suppliers(con)) | set(core.ebiz_vendors(con)))
-
-
-@page("Cross reference")
+@page
 def main():
     con = core.connect()
-    suppliers = reconciliation_suppliers(con)
+    suppliers = core.reconciliation_suppliers(con)
     status = core.ebiz_status(con)
     header(
         "Cross reference",
