@@ -1,7 +1,9 @@
 """Self-check for the carton tracker. Run: python -m pytest check.py -v"""
 import gc
+import logging
 import os
 import re
+import time
 import zipfile
 from datetime import date, datetime
 from io import BytesIO
@@ -120,7 +122,7 @@ def test_view_numbers_are_python_ints_and_floats():
     assert type(totals[0]) is int and type(totals[1]) is float
 
 
-def test_rows_act_like_sqlite_rows():
+def test_rows_read_by_name_and_position():
     con = core.connect()
     r = con.execute("SELECT 1 AS a, 'x' AS b").fetchone()
     assert (r[0], r["b"], dict(r), tuple(r)) == (1, "x", {"a": 1, "b": "x"}, (1, "x"))
@@ -1011,6 +1013,41 @@ def test_live_report_pages(xref_con, monkeypatch, page_name, expected_control):
     controls = [button.label for button in at.button]
     controls += [button.label for button in at.get("download_button")]
     assert expected_control in controls
+
+
+def test_page_shows_error_panel_when_database_is_unreachable(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nobody:wrong@127.0.0.1:1/none?connect_timeout=2")
+    at = AppTest.from_file(str(HERE / "pages" / "1_Dashboard.py"), default_timeout=30).run()
+    assert any("could not be loaded" in e.value for e in at.error)
+
+
+def test_page_runs_leave_no_open_connections(xref_con):
+    from streamlit.testing.v1 import AppTest
+
+    def open_connections():
+        return xref_con.execute(
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()"
+        ).fetchone()[0]
+
+    def settled():  # a closed connection's backend leaves pg_stat_activity a moment later
+        for handler in logging.getLogger().handlers:  # pytest keeps logged tracebacks, and so page frames
+            if hasattr(handler, "records"):
+                handler.reset()
+        gc.collect()
+        for _ in range(50):
+            count = open_connections()
+            if count == 0:
+                break
+            time.sleep(0.1)
+        return count
+
+    assert settled() == 0
+    open_tabs = [AppTest.from_file(str(HERE / "pages" / page), default_timeout=60).run()  # sessions stay alive
+                 for page in ("1_Dashboard.py", "3_Tracker.py", "6_Cross_Reference.py",
+                              "7_Discrepancy_Report.py", "8_Rebate_Report.py")]
+    assert settled() == 0
+    assert all(not tab.exception for tab in open_tabs)
 
 
 def test_discrepancy_pdf_says_when_a_section_is_empty(tmp_path):

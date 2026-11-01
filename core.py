@@ -129,7 +129,7 @@ def _schema():
 
 
 class Row(tuple):
-    """A result row read by position or by column name, like sqlite3.Row."""
+    """A result row read by position, by column name, or as a dict via dict(row)."""
 
     def __new__(cls, names, values):
         row = super().__new__(cls, values)
@@ -651,7 +651,7 @@ def cross_reference(con, supplier):
     """
     rows = {}
     for kind in TABLES:
-        found = [dict(r) for r in con.execute(f"SELECT * FROM v_{kind.lower()} WHERE supplier_key IS ?",
+        found = [dict(r) for r in con.execute(f"SELECT * FROM v_{kind.lower()} WHERE supplier_key IS NOT DISTINCT FROM %s",
                                               (supplier,))]
         for r in found:
             r["so"] = _so(r["ebiz_so"])
@@ -664,7 +664,7 @@ def cross_reference(con, supplier):
             o["tracker_qty"] += r["carton_qty"] or 0
             o["tracker_rebate"] += (r["pacd"] or 0) + (r["matalan_rebate"] or 0)
     ebiz_only = []
-    for e in (dict(r) for r in con.execute("SELECT * FROM ebiz WHERE vendor_key IS ? ORDER BY id", (supplier,))):
+    for e in (dict(r) for r in con.execute("SELECT * FROM ebiz WHERE vendor_key IS NOT DISTINCT FROM %s ORDER BY id", (supplier,))):
         if e["so_1"] in orders:
             e["key"], via_so2 = e["so_1"], False
         elif e["so_2"] in orders:
@@ -752,9 +752,9 @@ def save_rates(con, rates):
             raise ValueError(f"Row {i}: duplicate {kind} rate for {start}.")
         seen.add((kind, start))
         rows.append((kind, start, float(pcts[0]), float(pcts[1])))
-    with con:
+    with con.transaction():
         con.execute("DELETE FROM rates")
-        con.executemany("INSERT INTO rates VALUES (?, ?, ?, ?)", rows)
+        con.cursor().executemany("INSERT INTO rates VALUES (%s, %s, %s, %s)", rows)
         n, first = _unrated(con)
         if n:  # raising here rolls the transaction back
             raise ValueError(f"{n} shipment(s) from {first} on would have no rate. "
@@ -771,16 +771,16 @@ def quarter_label(fiscal_year, quarter):
 def _where(supplier=None, suppliers=None, fiscal_year=None, quarters=None):
     sql, params = ["shipment_date IS NOT NULL"], []
     if supplier is not None:
-        sql.append("supplier_key = ?")
+        sql.append("supplier_key = %s")
         params.append(supplier)
     if suppliers:
-        sql.append(f"supplier_key IN ({', '.join('?' * len(suppliers))})")
+        sql.append(f"supplier_key IN ({', '.join(['%s'] * len(suppliers))})")
         params += list(suppliers)
     if fiscal_year is not None:
-        sql.append("fiscal_year = ?")
+        sql.append("fiscal_year = %s")
         params.append(fiscal_year)
     if quarters:
-        sql.append(f"quarter IN ({', '.join('?' * len(quarters))})")
+        sql.append(f"quarter IN ({', '.join(['%s'] * len(quarters))})")
         params += list(quarters)
     return " AND ".join(sql), params
 
@@ -808,10 +808,10 @@ def editable_rows(con, kind, supplier=None, limit=None, offset=0):
         raise ValueError("Carton type must be STD or CUS.")
     where, params = "", []
     if supplier is not None:
-        where, params = "WHERE supplier_key IS ?", [supplier]
+        where, params = "WHERE supplier_key IS NOT DISTINCT FROM %s", [supplier]
     paging = ""
     if limit is not None:
-        paging = " LIMIT ? OFFSET ?"
+        paging = " LIMIT %s OFFSET %s"
         params += [int(limit), int(offset)]
     return [dict(r) for r in con.execute(
         f"SELECT id, {', '.join(COLUMNS)}, supplier_key, source_file, imported_at "
@@ -826,7 +826,7 @@ def editable_row_count(con, kind, supplier=None):
     if supplier is None:
         return con.execute(f"SELECT COUNT(*) FROM {TABLES[kind]}").fetchone()[0]
     return con.execute(
-        f"SELECT COUNT(*) FROM {TABLES[kind]} WHERE supplier_key IS ?",
+        f"SELECT COUNT(*) FROM {TABLES[kind]} WHERE supplier_key IS NOT DISTINCT FROM %s",
         (supplier,)).fetchone()[0]
 
 
@@ -868,7 +868,7 @@ def update_tracker_rows(con, kind, edited):
         if row_id in seen:
             raise ValueError(f"Row {number}: duplicate row ID {row_id}.")
         seen.add(row_id)
-        if not con.execute(f"SELECT 1 FROM {table} WHERE id = ?", (row_id,)).fetchone():
+        if not con.execute(f"SELECT 1 FROM {table} WHERE id = %s", (row_id,)).fetchone():
             raise ValueError(f"Row {number}: row ID {row_id} no longer exists. Refresh the page.")
 
         values = []
@@ -889,11 +889,11 @@ def update_tracker_rows(con, kind, edited):
         key = supplier_key(values[COLUMNS.index("packaging_supplier")])
         prepared.append(values + [key, row_id])
 
-    assignments = ", ".join(f"{col} = ?" for col in COLUMNS)
+    assignments = ", ".join(f"{col} = %s" for col in COLUMNS)
     now = datetime.now().isoformat(timespec="seconds")
-    with con:
-        con.executemany(
-            f"UPDATE {table} SET {assignments}, supplier_key = ?, imported_at = ? WHERE id = ?",
+    with con.transaction():
+        con.cursor().executemany(
+            f"UPDATE {table} SET {assignments}, supplier_key = %s, imported_at = %s WHERE id = %s",
             [values[:-1] + [now, values[-1]] for values in prepared])
     return len(prepared)
 
@@ -982,13 +982,13 @@ def supplier_name(con, key):
         f"SELECT packaging_supplier, supplier_key FROM {table}" for table in TABLES.values())
     row = con.execute(
         f"SELECT packaging_supplier FROM ({src}) "
-        "WHERE supplier_key IS ? AND packaging_supplier IS NOT NULL "
+        "WHERE supplier_key IS NOT DISTINCT FROM %s AND packaging_supplier IS NOT NULL "
         "GROUP BY packaging_supplier ORDER BY COUNT(*) DESC, packaging_supplier LIMIT 1",
         (key,)).fetchone()
     if row:
         return row[0]
     row = con.execute(
-        "SELECT vendor FROM ebiz WHERE vendor_key IS ? AND vendor IS NOT NULL "
+        "SELECT vendor FROM ebiz WHERE vendor_key IS NOT DISTINCT FROM %s AND vendor IS NOT NULL "
         "GROUP BY vendor ORDER BY COUNT(*) DESC, vendor LIMIT 1", (key,)).fetchone()
     return row[0] if row else key
 
@@ -1035,7 +1035,7 @@ def quarter_rates(con, kind, supplier, fiscal_year):
     out = {}
     for q, n_pacd, pacd, n_matalan, matalan, unrated in con.execute(
             f"SELECT quarter, COUNT(DISTINCT pacd_pct), MIN(pacd_pct), COUNT(DISTINCT matalan_pct), "
-            f"MIN(matalan_pct), SUM(pacd_pct IS NULL) FROM v_{kind.lower()} WHERE {where} GROUP BY quarter", params):
+            f"MIN(matalan_pct), COUNT(*) FILTER (WHERE pacd_pct IS NULL) FROM v_{kind.lower()} WHERE {where} GROUP BY quarter", params):
         out[q] = (pacd if n_pacd == 1 and not unrated else None, matalan if n_matalan == 1 and not unrated else None)
     return out
 

@@ -30,7 +30,7 @@ def main():
         kind = a.segmented_control("Tracker sheet", ["STD", "CUS"], default="STD",
                                    format_func=lambda value: core.SHEETS[value])
         supplier = b.selectbox("Packaging supplier", suppliers,
-                               format_func=lambda key: core.supplier_name(con, key))
+                               format_func={key: core.supplier_name(con, key) for key in suppliers}.get)
 
     count = core.editable_row_count(con, kind, supplier)
     pages = max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)

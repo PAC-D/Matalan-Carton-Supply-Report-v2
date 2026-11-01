@@ -25,7 +25,7 @@ def main():
 
     supplier = st.selectbox(
         "Packaging supplier", suppliers,
-        format_func=lambda key: core.supplier_name(con, key),
+        format_func={key: core.supplier_name(con, key) for key in suppliers}.get,
         key="cross_reference_supplier",
     )
     xref = core.cross_reference(con, supplier)

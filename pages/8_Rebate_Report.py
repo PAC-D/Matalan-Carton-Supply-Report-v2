@@ -59,7 +59,7 @@ def main():
     with st.container(border=True, key="card_rebate_filters"):
         supplier = st.selectbox(
             "Packaging supplier", suppliers,
-            format_func=lambda key: core.supplier_name(con, key),
+            format_func={key: core.supplier_name(con, key) for key in suppliers}.get,
             key="rebate_supplier",
         )
         years = core.fiscal_years(con, supplier=supplier)
