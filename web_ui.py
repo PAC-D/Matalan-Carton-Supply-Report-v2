@@ -92,6 +92,16 @@ h1, h2, h3, h4 { color: var(--mc-navy); letter-spacing: -.015em; }
 [class*="st-key-card_"] h3 { margin: 0 0 .25rem; font-size: 1.05rem; line-height: 1.25; }
 [class*="st-key-card_"] [data-testid="stVerticalBlock"] { gap: .45rem; }
 [class*="st-key-card_"] [data-testid="stVegaLiteChart"] { margin-top: -.35rem; }
+[class*="st-key-kpi_card_"] button {
+  width: 100%; min-height: 88px; padding: .7rem .8rem; white-space: pre-line;
+  justify-content: flex-start; text-align: left; line-height: 1.45;
+  background: var(--mc-surface); border-color: var(--mc-line); color: var(--mc-navy);
+  box-shadow: var(--mc-shadow); font-size: .86rem;
+}
+[class*="st-key-kpi_card_"] button p::first-line { color: var(--mc-muted); }
+[class*="st-key-kpi_card_"] button[kind="primary"] {
+  border-color: var(--mc-sky); background: #EAF7FD; box-shadow: 0 0 0 1px var(--mc-sky);
+}
 [class*="st-key-manage_row_"] { padding: .55rem 0; border-bottom: 1px solid var(--mc-line); }
 [data-testid="stMultiSelect"] [data-baseweb="tag"] {
   background: #EAF6FD; border: 1px solid #B9DFF3; border-radius: 6px;
@@ -207,14 +217,54 @@ def kpi_grid(tiles: list[dict]) -> None:
             + "".join(cards) + "</div>")
 
 
+def interactive_kpi_grid(tiles: list[dict], key: str, default: str = "all") -> str:
+    """Render KPI cards as real buttons and return the active tile id."""
+    state_key = f"{key}_active"
+    valid = {str(tile.get("id", index)) for index, tile in enumerate(tiles)}
+    if st.session_state.get(state_key) not in valid:
+        st.session_state[state_key] = default if default in valid else next(iter(valid))
+    columns = st.columns(len(tiles), gap="small")
+    for index, (column, tile) in enumerate(zip(columns, tiles)):
+        tile_id = str(tile.get("id", index))
+        label = f"{tile['label']}\n{tile['value']}"
+        if tile.get("note"):
+            label += f"\n{tile['note']}"
+        if column.button(label, key=f"kpi_card_{key}_{tile_id}", use_container_width=True,
+                         type="primary" if st.session_state[state_key] == tile_id else "secondary",
+                         help=tile.get("help")):
+            st.session_state[state_key] = tile_id
+    return st.session_state[state_key]
+
+
+def search_frame(frame, query: str):
+    """Case-insensitive contains search across every visible dataframe column."""
+    query = (query or "").strip().casefold()
+    if not query or frame.empty:
+        return frame
+    text = frame.fillna("").astype(str)
+    mask = text.apply(lambda column: column.str.casefold().str.contains(
+        query, regex=False, na=False)).any(axis=1)
+    return frame.loc[mask]
+
+
+def table_search(label: str, key: str, placeholder: str = "Search all columns") -> str:
+    return st.text_input(label, key=key, placeholder=placeholder,
+                         icon=":material/search:", label_visibility="collapsed")
+
+
 def page(title: str, description: str | None = None):
     """Replace raw page exceptions with a useful panel."""
     def decorate(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            first_load_key = f"page_loaded_{title}"
+            first_load = not st.session_state.get(first_load_key, False)
+            st.session_state[first_load_key] = True
             try:
-                result = fn(*args, **kwargs)
-                return result
+                if first_load:
+                    with st.spinner("Loading…"):
+                        return fn(*args, **kwargs)
+                return fn(*args, **kwargs)
             except Exception as exc:
                 st.error("This page could not be loaded. Try again, then contact support if it continues.")
                 with st.expander("Technical details"):

@@ -3,7 +3,7 @@ import streamlit as st
 
 import core
 import reports
-from web_ui import header, kpi_grid, page
+from web_ui import header, interactive_kpi_grid, page, search_frame, table_search
 
 
 def reconciliation_suppliers(con):
@@ -39,28 +39,38 @@ def main():
     missing = sum(row["status"] == "Not in eBiz" for row in rows)
     mismatches = sum(row["status"] in ("Tracker > eBiz", "Tracker < eBiz") for row in rows)
     no_so = sum(1 for kind_rows in xref["rows"].values() for row in kind_rows if not row["so"])
-    kpi_grid([
-        {"label": "Matched orders", "value": f"{matched:,}", "tone": "ok"},
-        {"label": "Missing from eBiz", "value": f"{missing:,}",
-         "tone": "warn" if missing else "ok"},
-        {"label": "Quantity mismatches", "value": f"{mismatches:,}",
-         "tone": "warn" if mismatches else "ok"},
-        {"label": "eBiz-only orders", "value": f"{len(ebiz_only):,}",
-         "tone": "warn" if ebiz_only else "ok"},
-        {"label": "Tracker rows without SO#", "value": f"{no_so:,}",
-         "tone": "warn" if no_so else "ok"},
-    ])
+    active = interactive_kpi_grid([
+        {"id": "all", "label": "All tracker orders", "value": f"{len(rows):,}"},
+        {"id": "match", "label": "Matched orders", "value": f"{matched:,}"},
+        {"id": "missing", "label": "Missing from eBiz", "value": f"{missing:,}"},
+        {"id": "mismatch", "label": "Quantity mismatches", "value": f"{mismatches:,}"},
+        {"id": "ebiz_only", "label": "eBiz-only orders", "value": f"{len(ebiz_only):,}"},
+        {"id": "no_so", "label": "Tracker rows without SO#", "value": f"{no_so:,}"},
+    ], "cross_reference")
 
-    if rows:
+    wanted = {
+        "match": {"Match"}, "missing": {"Not in eBiz"},
+        "mismatch": {"Tracker > eBiz", "Tracker < eBiz"}, "no_so": {None},
+    }.get(active)
+    shown_rows = [row for row in rows if wanted is None or row["status"] in wanted]
+    if active == "ebiz_only":
+        shown_rows = []
+
+    if shown_rows:
         with st.container(border=True, key="card_cross_reference_orders"):
             st.subheader("Tracker orders")
-            frame = pd.DataFrame(rows).rename(columns={
+            frame = pd.DataFrame(shown_rows).rename(columns={
                 "so": "SO#", "tracker_qty": "Tracker QTY",
                 "tracker_rebate": "Tracker Rebate", "ebiz_qty": "eBiz QTY",
                 "ebiz_rebate": "eBiz Rebate", "qty_difference": "QTY Difference",
                 "status": "Status", "via_so2": "Matched via SO_2",
             })
-            st.dataframe(
+            frame = search_frame(frame, table_search(
+                "Search tracker orders", "cross_reference_order_search"))
+            if frame.empty:
+                st.info("No tracker orders match your search.")
+            else:
+                st.dataframe(
                 frame, hide_index=True, height=min(620, 38 + 35 * len(frame)),
                 column_config={
                     "SO#": st.column_config.TextColumn(pinned=True),
@@ -71,10 +81,10 @@ def main():
                     "QTY Difference": st.column_config.NumberColumn(format="localized"),
                     "Matched via SO_2": st.column_config.CheckboxColumn(),
                 },
-                key="cross_reference_orders_table",
-            )
+                    key="cross_reference_orders_table",
+                )
     else:
-        st.info("No Tracker orders exist for this packaging supplier.")
+        st.info("No Tracker orders match the active card.")
 
     with st.container(border=True, key="card_cross_reference_ebiz_only"):
         st.subheader("eBiz orders not found in Tracker")
@@ -82,19 +92,30 @@ def main():
             frame = pd.DataFrame(ebiz_only).rename(columns={
                 "order": "Order", "ebiz_qty": "eBiz QTY", "ebiz_rebate": "eBiz Rebate",
             })
-            st.dataframe(
+            frame = search_frame(frame, table_search(
+                "Search eBiz-only orders", "cross_reference_ebiz_search"))
+            if frame.empty:
+                st.info("No eBiz-only orders match your search.")
+            else:
+                st.dataframe(
                 frame, hide_index=True,
                 column_config={
                     "Order": st.column_config.TextColumn(pinned=True),
                     "eBiz QTY": st.column_config.NumberColumn(format="localized"),
                     "eBiz Rebate": st.column_config.NumberColumn(format="$ %.2f"),
                 },
-                key="cross_reference_ebiz_only_table",
-            )
+                    key="cross_reference_ebiz_only_table",
+                )
         else:
             st.success("No eBiz-only orders for this supplier.")
 
-    filename, data = reports.cross_reference_xlsx(con, supplier, xref)
+    artifact_key = core.cache_key(
+        "cross-reference-xlsx-v1", supplier, core.data_revision(con))
+    artifact = core.cache_get(con, artifact_key)
+    if artifact is None:
+        artifact = reports.cross_reference_xlsx(con, supplier, xref)
+        core.cache_set(con, artifact_key, "cross-reference-xlsx-v1", artifact, max_entries=12)
+    filename, data = artifact
     st.download_button(
         "Download Cross Reference workbook", data, file_name=filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

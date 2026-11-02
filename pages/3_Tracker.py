@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import header, page
+from web_ui import header, page, table_search
 
 PAGE_SIZE = 250
 
@@ -32,8 +32,10 @@ def main():
                                    format_func=lambda value: core.SHEETS[value])
         supplier = b.selectbox("Packaging supplier", suppliers,
                                format_func=lambda key: core.supplier_name(con, key))
+        search = table_search("Search tracker rows", "tracker_search",
+                              "Search SO, PO, factory, carton style, dates, quantities…")
 
-    count = core.editable_row_count(con, kind, supplier)
+    count = core.editable_row_count(con, kind, supplier, search=search)
     pages = max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)
     selected_page = 1
     if pages > 1:
@@ -41,9 +43,9 @@ def main():
             "Page", range(1, pages + 1),
             format_func=lambda number: f"Page {number} of {pages}", width=180)
     rows = core.editable_rows(con, kind, supplier, PAGE_SIZE,
-                              (selected_page - 1) * PAGE_SIZE)
+                              (selected_page - 1) * PAGE_SIZE, search=search)
     if not rows:
-        st.info("No rows match this sheet and supplier.")
+        st.info("No rows match this sheet, supplier, and search.")
         return
 
     frame = pd.DataFrame(rows)

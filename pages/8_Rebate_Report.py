@@ -3,7 +3,7 @@ import streamlit as st
 
 import core
 import reports
-from web_ui import header, kpi_grid, page
+from web_ui import header, kpi_grid, page, search_frame, table_search
 
 REPORT_COLUMNS = [column for column in core.COLUMNS if column != "note"]
 
@@ -30,6 +30,10 @@ def rebate_frame(rows):
 def show_rebate_rows(frame, key):
     if frame.empty:
         st.info("No rows match this carton type and period.")
+        return
+    frame = search_frame(frame, table_search("Search rebate rows", f"{key}_search"))
+    if frame.empty:
+        st.info("No rebate rows match your search.")
         return
     st.dataframe(
         frame, hide_index=True, height=min(620, 38 + 35 * len(frame)),
@@ -106,10 +110,18 @@ def main():
     tracker_revision = max((row["imported_at"] or "" for row in all_rows), default="")
     build_key = (supplier, year, tuple(sorted(quarters)), tracker_revision,
                  len(all_rows), total_qty, round(total_amount, 2), round(pacd + rebate, 2))
+    artifact_key = core.cache_key("rebate-pdf-v1", build_key, core.data_revision(con))
+    if "live_rebate_pdf" not in st.session_state:
+        cached = core.cache_get(con, artifact_key)
+        if cached is not None:
+            st.session_state["live_rebate_pdf"] = (build_key, *cached)
     if st.button("Prepare Rebate Report PDF", icon=":material/picture_as_pdf:"):
-        with st.spinner("Building PDF..."):
-            st.session_state["live_rebate_pdf"] = (
-                build_key, *reports.rebate_report_pdf(con, supplier, year, quarters))
+        with st.spinner("Preparing rebate PDF…"):
+            cached = core.cache_get(con, artifact_key)
+            if cached is None:
+                cached = reports.rebate_report_pdf(con, supplier, year, quarters)
+                core.cache_set(con, artifact_key, "rebate-pdf-v1", cached, max_entries=12)
+            st.session_state["live_rebate_pdf"] = (build_key, *cached)
     built = st.session_state.get("live_rebate_pdf")
     if built and built[0] == build_key:
         _, filename, data = built

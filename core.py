@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import pickle
 import re
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -125,6 +126,17 @@ def _schema():
     ebiz_cols = ",\n  ".join(f"{c} {'REAL' if c in EBIZ_REAL else 'TEXT'}" for c in EBIZ_COLUMNS)
     sql.append(f"CREATE TABLE IF NOT EXISTS ebiz (\n  id INTEGER PRIMARY KEY,\n  {ebiz_cols},\n"
                f"  source_file TEXT,\n  imported_at TEXT\n);")
+    sql.append("""CREATE TABLE IF NOT EXISTS persistent_cache (
+  cache_key TEXT PRIMARY KEY,
+  namespace TEXT NOT NULL,
+  payload BLOB NOT NULL,
+  created_at TEXT NOT NULL,
+  accessed_at TEXT NOT NULL
+);""")
+    sql.append("""CREATE TABLE IF NOT EXISTS data_revision (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  revision INTEGER NOT NULL
+);""")
     for kind, table in TABLES.items():
         view = f"v_{kind.lower()}"
         sql.append(f"DROP VIEW IF EXISTS {view};")
@@ -137,9 +149,12 @@ def connect(path=None):
 
     Path: the argument, else env CARTON_DB, else carton.db next to this file.
     """
-    con = sqlite3.connect(path or os.environ.get("CARTON_DB") or DEFAULT_DB)
+    con = sqlite3.connect(path or os.environ.get("CARTON_DB") or DEFAULT_DB, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA busy_timeout = 30000")
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA synchronous = FULL")
     if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
         con.executescript(_schema())
         con.executescript("""
@@ -149,10 +164,85 @@ DROP TABLE IF EXISTS packaging_suppliers;
 DROP TABLE IF EXISTS app_meta;
 """)
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    # Existing v5 databases gain the restart-safe cache without rebuilding
+    # any business-data tables or views.
+    con.execute("""CREATE TABLE IF NOT EXISTS persistent_cache (
+      cache_key TEXT PRIMARY KEY, namespace TEXT NOT NULL, payload BLOB NOT NULL,
+      created_at TEXT NOT NULL, accessed_at TEXT NOT NULL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS data_revision (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL)""")
+    con.execute("INSERT OR IGNORE INTO data_revision VALUES (1, 0)")
     if not con.execute("SELECT 1 FROM rates LIMIT 1").fetchone():
         with con:
             con.executemany("INSERT INTO rates VALUES (?, ?, ?, ?)", SEED_RATES)
+    # Schema/cache bootstrapping must never leave a write transaction open;
+    # Streamlit fragments may open another connection during the same render.
+    con.commit()
     return con
+
+
+def cache_key(namespace, *parts):
+    """Stable key for an application-owned persistent cache entry."""
+    digest = hashlib.sha256(namespace.encode())
+    for part in parts:
+        raw = (bytes(part) if isinstance(part, (bytes, bytearray, memoryview)) else
+               json.dumps(part, sort_keys=True, default=str,
+                          separators=(",", ":")).encode())
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(raw)
+    return f"{namespace}:{digest.hexdigest()}"
+
+
+def cache_get(con, key):
+    """Return a trusted application cache value, or None when absent/corrupt."""
+    row = con.execute("SELECT payload FROM persistent_cache WHERE cache_key = ?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        value = pickle.loads(row[0])
+    except (pickle.PickleError, EOFError, AttributeError, ValueError, TypeError):
+        with con:
+            con.execute("DELETE FROM persistent_cache WHERE cache_key = ?", (key,))
+        return None
+    with con:
+        con.execute("UPDATE persistent_cache SET accessed_at = ? WHERE cache_key = ?",
+                    (datetime.now().isoformat(timespec="seconds"), key))
+    return value
+
+
+def cache_set(con, key, namespace, value, max_entries=30):
+    """Persist an application-produced value and trim old namespace entries."""
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = sqlite3.Binary(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+    with con:
+        con.execute("INSERT OR REPLACE INTO persistent_cache VALUES (?, ?, ?, ?, ?)",
+                    (key, namespace, payload, now, now))
+        con.execute(
+            "DELETE FROM persistent_cache WHERE cache_key IN ("
+            "SELECT cache_key FROM persistent_cache WHERE namespace = ? "
+            "ORDER BY accessed_at DESC LIMIT -1 OFFSET ?)",
+            (namespace, int(max_entries)),
+        )
+
+
+def _bump_revision(con):
+    con.execute("UPDATE data_revision SET revision = revision + 1 WHERE singleton = 1")
+
+
+def data_revision(con):
+    """A compact token that changes after tracker, eBiz, or rate data changes."""
+    revision = con.execute(
+        "SELECT revision FROM data_revision WHERE singleton = 1").fetchone()[0]
+    values = []
+    for table in (*TABLES.values(), "ebiz"):
+        values.extend(con.execute(
+            f"SELECT COUNT(*), COALESCE(MAX(imported_at), '') FROM {table}"
+        ).fetchone())
+    values.extend(con.execute(
+        "SELECT COUNT(*), COALESCE(MAX(effective_from || ':' || pacd_pct || ':' || matalan_pct), '') "
+        "FROM rates"
+    ).fetchone())
+    return f"{revision}-" + hashlib.sha256(repr(tuple(values)).encode()).hexdigest()[:16]
 
 
 EXCEL_ERRORS = {"#N/A", "#VALUE!", "#REF!", "#DIV/0!", "#NAME?", "#NUM!", "#NULL!"}
@@ -498,6 +588,7 @@ def save_many(con, files):
                                   _shown(r["_file"]["po_received_date"]), _shown(r["_file"]["shipment_date"]),
                                   r["po_received_date"], r["shipment_date"], now)
                                  for r in rows if r.get("_review")])
+        _bump_revision(con)
     return {name: {kind: len(rows) for kind, rows in data.items()} for name, data in files.items()}
 
 
@@ -597,6 +688,7 @@ def replace_ebiz(con, files):
         for name, rows in files.items():
             con.executemany(f"INSERT INTO ebiz ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                             [[r[c] for c in EBIZ_COLUMNS] + [name, now] for r in rows])
+        _bump_revision(con)
     return {name: len(rows) for name, rows in files.items()}
 
 
@@ -743,6 +835,7 @@ def save_rates(con, rates):
         if n:  # raising here rolls the transaction back
             raise ValueError(f"{n} shipment(s) from {first} on would have no rate. "
                              f"Add a rate that starts on or before {first}.")
+        _bump_revision(con)
 
 
 QUARTER_MONTHS = {1: "Dec-Mar", 2: "Apr-Jun", 3: "Jul-Aug", 4: "Sep-Nov"}
@@ -782,7 +875,16 @@ def rows(con, kind, **filters):
         f"SELECT * FROM v_{kind.lower()} WHERE {where} ORDER BY shipment_date, id", params)]
 
 
-def editable_rows(con, kind, supplier=None, limit=None, offset=0):
+def _editable_search(search):
+    if not search or not str(search).strip():
+        return "", []
+    value = f"%{str(search).strip().lower()}%"
+    columns = ["id", *COLUMNS, "source_file", "imported_at"]
+    return ("(" + " OR ".join(f"LOWER(CAST({col} AS TEXT)) LIKE ?" for col in columns) + ")",
+            [value] * len(columns))
+
+
+def editable_rows(con, kind, supplier=None, limit=None, offset=0, search=None):
     """Raw tracker rows for the web editor, including undated rows.
 
     Computed report fields are deliberately excluded: rates, rebates, PACD,
@@ -790,9 +892,15 @@ def editable_rows(con, kind, supplier=None, limit=None, offset=0):
     """
     if kind not in TABLES:
         raise ValueError("Carton type must be STD or CUS.")
-    where, params = "", []
+    clauses, params = [], []
     if supplier is not None:
-        where, params = "WHERE supplier_key IS ?", [supplier]
+        clauses.append("supplier_key IS ?")
+        params.append(supplier)
+    search_sql, search_params = _editable_search(search)
+    if search_sql:
+        clauses.append(search_sql)
+        params += search_params
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paging = ""
     if limit is not None:
         paging = " LIMIT ? OFFSET ?"
@@ -803,15 +911,20 @@ def editable_rows(con, kind, supplier=None, limit=None, offset=0):
         f"ORDER BY shipment_date IS NULL, shipment_date, id{paging}", params)]
 
 
-def editable_row_count(con, kind, supplier=None):
+def editable_row_count(con, kind, supplier=None, search=None):
     """Number of raw rows matching one tracker-editor selection."""
     if kind not in TABLES:
         raise ValueError("Carton type must be STD or CUS.")
-    if supplier is None:
-        return con.execute(f"SELECT COUNT(*) FROM {TABLES[kind]}").fetchone()[0]
-    return con.execute(
-        f"SELECT COUNT(*) FROM {TABLES[kind]} WHERE supplier_key IS ?",
-        (supplier,)).fetchone()[0]
+    clauses, params = [], []
+    if supplier is not None:
+        clauses.append("supplier_key IS ?")
+        params.append(supplier)
+    search_sql, search_params = _editable_search(search)
+    if search_sql:
+        clauses.append(search_sql)
+        params += search_params
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return con.execute(f"SELECT COUNT(*) FROM {TABLES[kind]}{where}", params).fetchone()[0]
 
 
 def _manual_date(value, row_number, label):
@@ -892,6 +1005,7 @@ def update_tracker_rows(con, kind, edited):
         con.executemany(
             f"UPDATE {table} SET {assignments}, supplier_key = ?, imported_at = ? WHERE id = ?",
             [values[:-1] + [now, values[-1]] for values in prepared])
+        _bump_revision(con)
     return len(prepared)
 
 
