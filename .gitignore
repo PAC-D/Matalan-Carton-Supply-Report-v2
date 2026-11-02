@@ -2,6 +2,8 @@
 *.xlsm
 Reports/
 carton*.db
+carton*.db-shm
+carton*.db-wal
 certs/
 data/
 .venv/
