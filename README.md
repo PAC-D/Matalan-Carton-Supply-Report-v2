@@ -40,25 +40,32 @@ appears in navigation and the Matalan wordmark appears in the top bar.
 - Imports all current eBiz vendor exports as one atomic replacement.
 - Creates Summary, Full Tracker, Raw Data, Shipment Tracking, Discrepancy and
   Cross Reference reports.
-- Stores application data in SQLite. A fresh database is created and seeded on
-  first start.
+- Stores application data in PostgreSQL (`DATABASE_URL`). Tables and views are
+  created and rates seeded on first connect.
 
 ## Requirements
 
 - Python 3.14+
 - Packages in `requirements.txt`
+- PostgreSQL 16+ (local development uses `postgres:18` in Docker Desktop)
 - Windows 10/11 for `run.bat`; Linux is supported through the manual or Docker
   commands
-- No external database or API keys for the current single-instance setup
 
 ## Run locally
 
 ### Windows one-click
 
+Start a local PostgreSQL once (Docker Desktop must be running):
+
+```powershell
+docker run -d --name carton-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:18
+```
+
+After a reboot, `docker start carton-pg` brings it back with its data.
+
 Double-click `run.bat`. On the first run it creates `.venv`, installs the
-requirements and opens the website at <http://localhost:8501>. The launcher
-always uses the existing `carton.db` in this project folder, so previously
-imported tracker data is available without importing the workbook again.
+requirements and opens the website at <http://localhost:8501>. Unless
+`DATABASE_URL` is already set, it uses the local `carton-pg` database.
 
 ### Manual setup
 
@@ -67,55 +74,38 @@ py -3.14 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+$env:DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/postgres"
 python -m streamlit run app.py --server.address localhost --server.port 8501
 ```
 
 Open <http://localhost:8501>.
 
-The first start creates `carton.db` next to `app.py`. To keep development data
-elsewhere:
+## Production (Lightsail + RDS)
 
-```powershell
-$env:CARTON_DB = "$PWD\data\carton-dev.db"
-python -m streamlit run app.py
-```
+Production runs at <https://matalan.pac-d.com/carton-supply-report/> on the
+Lightsail server `ubuntu_pacd`, with its data in the RDS PostgreSQL instance
+`database-1` (database `matalan_carton`, login `matalan_carton_app`).
 
-## Run with Docker
+On the server, the app lives in `/opt/matalan-carton`:
 
-Create the environment file once:
+- `.env` (mode 600, never committed) holds `DATABASE_URL`; see `.env.example`.
+- `certs/global-bundle.pem` is the RDS CA bundle used for `sslmode=verify-full`:
+  `curl -fsSo certs/global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem`
+- The container is published on `127.0.0.1:8502` only (8501 is the Primark
+  allocation app). Host nginx serves it over
+  HTTPS with basic auth, using the locations in
+  `deploy/nginx-matalan-carton-report.conf` and the password file
+  `/etc/nginx/.htpasswd-carton-supply-report`.
 
-```powershell
-Copy-Item .env.example .env
-docker compose up -d --build
-```
-
-Open <http://localhost:8501/matalan-carton-report/>.
-
-Docker stores SQLite data in the named `carton-data` volume and writes saved
-reports to the host `Reports/` folder. Do not scale this configuration to
-multiple containers; SQLite is intended here for one application instance.
-
-The database is excluded from Git and the Docker image. A new Docker volume
-therefore starts empty. To carry the current local data to a new server, start
-the container once, stop the service, copy `carton.db` into its data volume,
-fix ownership, and start it again:
+Deploy an update:
 
 ```bash
-docker compose up -d --build
-docker compose stop matalan-carton-report
-docker cp ./carton.db matalan-carton-report:/data/carton.db
-docker compose run --rm --user root matalan-carton-report chown 1000:1000 /data/carton.db
-docker compose start matalan-carton-report
+cd /opt/matalan-carton
+git pull
+sudo docker compose up -d --build
 ```
 
-Alternatively, leave the new volume empty and import the tracker and eBiz
-workbooks through the **Data import** page.
-
-For production, put nginx or another TLS reverse proxy in front of the
-container. A route template is provided at
-`deploy/nginx-matalan-carton-report.conf`. It expects an nginx basic-auth file
-at `/etc/nginx/.htpasswd-matalan-carton-report`; create that file before
-enabling the route. You can replace basic auth with platform SSO if preferred.
+Saved reports are written to `/opt/matalan-carton/Reports/`.
 
 ## Data workflow
 
@@ -165,19 +155,37 @@ a downloadable ZIP or save files under `Reports/<Month>/`.
 
 | Setting | Purpose | Default |
 |---|---|---|
-| `CARTON_DB` | SQLite database path | `carton.db` beside `app.py` |
+| `DATABASE_URL` | PostgreSQL connection URL | none; required (`run.bat` sets a local default) |
 | `REPORTS_DIR` | Server-side saved-report directory | `Reports/` beside the app |
 
-Back up the database while the app is stopped, or use SQLite's online backup
-API. `carton.db`, `.env`, `data/` and `Reports/` are excluded from Git.
+Production data is backed up by RDS automated backups (7-day retention on
+`database-1`). `.env`, `certs/` and `Reports/` are excluded from Git.
 
-The SQLite file contains parsed tracker rows, parsed eBiz rows, saved date
+The database contains parsed tracker rows, parsed eBiz rows, saved date
 corrections and rebate rates. It records source workbook names and import times,
 but it does not embed copies of the original Excel workbooks. Keep those
 workbooks separately if the source files must also be retained.
 
-For multiple app containers or sustained concurrent editing, migrate the
-persistence layer to PostgreSQL before scaling.
+Each page run opens one connection and closes it when the page finishes. Add
+connection pooling (`psycopg_pool`) and application roles before scaling to
+many concurrent users.
+
+## Design decisions
+
+- Streamlit, because the Primark reference implementation uses it and the
+  Python report engine is mature and tested.
+- Tracker edits are transactional; report-only fields are recalculated by the
+  database views and cannot be edited.
+- The Dashboard and Summary workbook share `core.summary_rows`; the live Cross
+  Reference, Discrepancy and Rebate pages share their aggregations and views
+  with the generated reports, so live and printed totals always agree.
+
+## Open deployment items
+
+- The `database-1` security group allows port 5432 from `0.0.0.0/0` for the
+  Primark app; access is protected only by password and TLS. Narrow it when the
+  Primark app's network path is known.
+- Authentication is nginx basic auth; SSO or application accounts are not set up.
 
 ## Testing
 
@@ -185,8 +193,11 @@ persistence layer to PostgreSQL before scaling.
 python -m pytest check.py -q
 ```
 
-The suite covers schema/rates, tracker and eBiz imports, date correction,
-manual tracker editing, report generation and page smoke tests.
+The suite needs the local `carton-pg` database (or set `TEST_DATABASE_URL`).
+It drops and recreates the `public` schema before every test, so never point it
+at production. It covers schema/rates, tracker and eBiz imports, date
+correction, manual tracker editing, report generation, page smoke tests, and
+that pages release their database connections.
 
 ## Project structure
 
@@ -194,14 +205,13 @@ manual tracker editing, report generation and page smoke tests.
 app.py              Website navigation
 pages/              Dashboard, report views/builders, tracker editor, rates and imports
 web_ui.py           Responsive PACD/Matalan theme and shared page chrome
-core.py             SQLite schema, imports, edits, queries and reconciliation
+core.py             PostgreSQL schema, imports, edits, queries and reconciliation
 reports.py          Excel/PDF report builders
 assets/             PACD and Matalan logos
 .streamlit/         Website theme and upload configuration
 Dockerfile          Hosted application image
-docker-compose.yml  Persistent single-instance deployment
+docker-compose.yml  Single-instance deployment (reads .env, mounts certs/ and Reports/)
 deploy/             Reverse-proxy configuration
-CODEX.md            Architecture decisions and future deployment inputs
 check.py            Automated test suite
 ```
 

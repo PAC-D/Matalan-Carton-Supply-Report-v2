@@ -2,8 +2,9 @@
 setlocal
 cd /d "%~dp0"
 
-rem Always use this checkout's existing database for local development.
-set "CARTON_DB=%~dp0carton.db"
+rem Local development uses PostgreSQL in Docker:
+rem   docker run -d --name carton-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:18
+if not defined DATABASE_URL set "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres"
 
 set "PYEXE="
 for /f "delims=" %%i in ('where python 2^>nul') do if not defined PYEXE set "PYEXE=%%i"
@@ -28,7 +29,7 @@ if errorlevel 1 goto :failed
 echo.
 echo Matalan Carton Supply Report
 echo http://localhost:8501
-echo Database: %CARTON_DB%
+echo Database: local PostgreSQL (start it with: docker start carton-pg)
 echo Press Ctrl+C to stop.
 echo.
 "%VENV_PY%" -m streamlit run app.py --server.address=localhost --server.port=8501

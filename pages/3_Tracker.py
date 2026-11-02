@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import header, page, table_search
+from web_ui import clear_built_reports, header, page, table_search
 
 PAGE_SIZE = 250
 
@@ -13,12 +13,11 @@ def same_value(left, right):
     return left_missing and right_missing if left_missing or right_missing else left == right
 
 
-@page("Tracker data")
+@page
 def main():
     con = core.connect()
     suppliers = core.tracker_suppliers(con)
-    total = sum(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in core.TABLES.values())
+    total = sum(core.editable_row_count(con, kind) for kind in core.TABLES)
     header("Tracker data",
            "Review and manually correct imported tracker values. Report calculations update immediately.",
            "Stored rows", f"{total:,}")
@@ -30,8 +29,8 @@ def main():
         a, b = st.columns(2)
         kind = a.segmented_control("Tracker sheet", ["STD", "CUS"], default="STD",
                                    format_func=lambda value: core.SHEETS[value])
-        supplier = b.selectbox("Packaging supplier", suppliers,
-                               format_func=lambda key: core.supplier_name(con, key))
+        names = {key: core.supplier_name(con, key) for key in suppliers}
+        supplier = b.selectbox("Packaging supplier", suppliers, format_func=names.get)
         search = table_search("Search tracker rows", "tracker_search",
                               "Search SO, PO, factory, carton style, dates, quantities…")
 
@@ -89,6 +88,7 @@ def main():
         except ValueError as exc:
             st.error(str(exc))
         else:
+            clear_built_reports()
             st.toast(f"Saved {count:,} tracker rows", icon=":material/check_circle:")
             st.rerun()
 

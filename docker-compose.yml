@@ -5,14 +5,9 @@ services:
     container_name: matalan-carton-report
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8501:8501"
-    environment:
-      CARTON_DB: ${CARTON_DB:-/data/carton.db}
-      REPORTS_DIR: ${REPORTS_DIR:-/app/Reports}
+      - "127.0.0.1:8502:8501"  # host 8501 belongs to the Primark allocation app
+    env_file: .env
     volumes:
-      - carton-data:/data
       - ./Reports:/app/Reports
+      - ./certs:/app/certs:ro
     mem_limit: 1g
-
-volumes:
-  carton-data:

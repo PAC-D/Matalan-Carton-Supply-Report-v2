@@ -48,10 +48,10 @@ def show_tracker_rows(frame, key):
     )
 
 
-@page("Discrepancy report")
+@page
 def main():
     con = core.connect()
-    suppliers = sorted(set(core.tracker_suppliers(con)) | set(core.ebiz_vendors(con)))
+    suppliers = core.reconciliation_suppliers(con)
     status = core.ebiz_status(con)
     header(
         "Discrepancy report",

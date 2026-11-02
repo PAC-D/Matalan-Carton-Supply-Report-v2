@@ -2,6 +2,7 @@
 *.xlsm
 Reports/
 carton*.db
+certs/
 data/
 .venv/
 .env

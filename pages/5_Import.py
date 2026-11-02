@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import header, page
+from web_ui import clear_built_reports, header, page
 
 DATE_EDITS = {
     "PO Received Date": "PO Received Date to import",
@@ -13,7 +13,7 @@ DATE_EDITS = {
 
 
 def read_cached_upload(con, content, kind):
-    """Parse once and keep the validated result in the persistent SQLite cache."""
+    """Parse once and keep the validated result in the persistent PostgreSQL cache."""
     namespace = f"upload-{kind}-v1"
     key = core.cache_key(namespace, content)
     cached = core.cache_get(con, key)
@@ -98,7 +98,7 @@ def tracker_import(con):
                 except Exception as exc:
                     st.error(f"Tracker import failed. No partial changes were saved. {exc}")
                 else:
-                    st.session_state.pop("built_reports", None)
+                    clear_built_reports()
                     st.success(f"Import finished: {total:,} tracker rows are saved.")
                     st.toast(f"Imported {total:,} tracker rows", icon=":material/check_circle:")
                     if core.unrated_count(con):
@@ -154,17 +154,16 @@ def ebiz_import(con):
             except Exception as exc:
                 st.error(f"eBiz import failed. Existing eBiz data is unchanged. {exc}")
             else:
-                st.session_state.pop("built_reports", None)
+                clear_built_reports()
                 st.session_state["import_flash"] = (
                     f"Replacement finished: {total:,} eBiz rows are saved.")
                 st.rerun()
 
 
-@page("Data import")
+@page
 def main():
     con = core.connect()
-    tracker_count = sum(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                        for table in core.TABLES.values())
+    tracker_count = sum(core.editable_row_count(con, kind) for kind in core.TABLES)
     header("Data import", "Validate and import tracker workbooks and eBiz vendor exports.",
            "Tracker rows", f"{tracker_count:,}")
     if message := st.session_state.pop("import_flash", None):

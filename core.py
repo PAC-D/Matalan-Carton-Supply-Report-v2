@@ -1,19 +1,15 @@
-"""SQLite storage, Excel import and report queries for the Matalan carton tracker."""
+"""PostgreSQL storage, Excel import and report queries for the Matalan carton tracker."""
 import hashlib
 import json
 import math
 import os
 import pickle
 import re
-import sqlite3
 from datetime import date, datetime, timedelta
-from io import BytesIO
-from pathlib import Path
 
 import openpyxl
+import psycopg
 
-DEFAULT_DB = Path(__file__).with_name("carton.db")
-SCHEMA_VERSION = 5
 TABLES = {"STD": "track_std", "CUS": "track_cus"}
 SHEETS = {"STD": "TRACK_STD", "CUS": "TRACK_CUS"}
 
@@ -77,38 +73,39 @@ SEED_RATES = [
 ]
 
 VIEW_SQL = """
-CREATE VIEW {view} AS
+CREATE OR REPLACE VIEW {view} AS
 SELECT t.*, r.pacd_pct, r.matalan_pct,
   t.unit_price * t.carton_qty * r.matalan_pct AS matalan_rebate,
   (t.total_amount - t.unit_price * t.carton_qty * r.matalan_pct) * r.pacd_pct AS pacd,
-  CAST(strftime('%Y', t.shipment_date) AS INTEGER) + (strftime('%m', t.shipment_date) = '12') AS fiscal_year,
+  EXTRACT(YEAR FROM t.shipment_date::date)::int
+    + (EXTRACT(MONTH FROM t.shipment_date::date) = 12)::int AS fiscal_year,
   CASE
     WHEN t.shipment_date IS NULL THEN NULL
-    WHEN CAST(strftime('%m', t.shipment_date) AS INTEGER) IN (12, 1, 2, 3) THEN 1
-    WHEN CAST(strftime('%m', t.shipment_date) AS INTEGER) BETWEEN 4 AND 6 THEN 2
-    WHEN CAST(strftime('%m', t.shipment_date) AS INTEGER) IN (7, 8) THEN 3
+    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int IN (12, 1, 2, 3) THEN 1
+    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int BETWEEN 4 AND 6 THEN 2
+    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int IN (7, 8) THEN 3
     ELSE 4
   END AS quarter
 FROM {table} t
 LEFT JOIN rates r ON r.carton_type = '{kind}' AND r.effective_from = (
   SELECT MAX(effective_from) FROM rates
-  WHERE carton_type = '{kind}' AND effective_from <= t.shipment_date);
+  WHERE carton_type = '{kind}' AND effective_from::date <= t.shipment_date::date);
 """
 
 
 def _col_type(col):
-    return "INTEGER" if col in INT_COLS else "REAL" if col in REAL_COLS else "TEXT"
+    return "INTEGER" if col in INT_COLS else "DOUBLE PRECISION" if col in REAL_COLS else "TEXT"
 
 
 def _schema():
     cols = ",\n  ".join(f"{c} {_col_type(c)}" for c in COLUMNS)
-    sql = [f"CREATE TABLE IF NOT EXISTS {t} (\n  id INTEGER PRIMARY KEY,\n  {cols},\n"
+    sql = [f"CREATE TABLE IF NOT EXISTS {t} (\n  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n  {cols},\n"
            f"  supplier_key TEXT,\n  source_file TEXT,\n  imported_at TEXT\n);" for t in TABLES.values()]
     sql.append("""CREATE TABLE IF NOT EXISTS rates (
   carton_type TEXT NOT NULL CHECK (carton_type IN ('STD', 'CUS')),
   effective_from TEXT NOT NULL,
-  pacd_pct REAL NOT NULL,
-  matalan_pct REAL NOT NULL,
+  pacd_pct DOUBLE PRECISION NOT NULL,
+  matalan_pct DOUBLE PRECISION NOT NULL,
   PRIMARY KEY (carton_type, effective_from)
 );""")
     sql.append("""CREATE TABLE IF NOT EXISTS date_fixes (
@@ -123,13 +120,13 @@ def _schema():
   shipment_date TEXT,
   saved_at TEXT NOT NULL
 );""")
-    ebiz_cols = ",\n  ".join(f"{c} {'REAL' if c in EBIZ_REAL else 'TEXT'}" for c in EBIZ_COLUMNS)
-    sql.append(f"CREATE TABLE IF NOT EXISTS ebiz (\n  id INTEGER PRIMARY KEY,\n  {ebiz_cols},\n"
+    ebiz_cols = ",\n  ".join(f"{c} {'DOUBLE PRECISION' if c in EBIZ_REAL else 'TEXT'}" for c in EBIZ_COLUMNS)
+    sql.append(f"CREATE TABLE IF NOT EXISTS ebiz (\n  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n  {ebiz_cols},\n"
                f"  source_file TEXT,\n  imported_at TEXT\n);")
     sql.append("""CREATE TABLE IF NOT EXISTS persistent_cache (
   cache_key TEXT PRIMARY KEY,
   namespace TEXT NOT NULL,
-  payload BLOB NOT NULL,
+  payload BYTEA NOT NULL,
   created_at TEXT NOT NULL,
   accessed_at TEXT NOT NULL
 );""")
@@ -139,45 +136,50 @@ def _schema():
 );""")
     for kind, table in TABLES.items():
         view = f"v_{kind.lower()}"
-        sql.append(f"DROP VIEW IF EXISTS {view};")
         sql.append(VIEW_SQL.format(view=view, table=table, kind=kind))
     return "\n".join(sql)
 
 
-def connect(path=None):
-    """Open the database; create the schema when its version is not SCHEMA_VERSION.
+class Row(tuple):
+    """A result row read by position, by column name, or as a dict via dict(row)."""
 
-    Path: the argument, else env CARTON_DB, else carton.db next to this file.
+    def __new__(cls, names, values):
+        row = super().__new__(cls, values)
+        row._names = names
+        return row
+
+    def keys(self):
+        return self._names
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._names.index(key) if isinstance(key, str) else key)
+
+
+def _row_factory(cursor):
+    names = [c.name for c in cursor.description or ()]
+    return lambda values: Row(names, values)
+
+
+_ready = set()  # database URLs whose schema this process has created
+
+
+def connect(url=None):
+    """Open an autocommit connection; create the schema and seed rates once per process.
+
+    URL: the argument, else env DATABASE_URL. Writes go in `with con.transaction():`.
     """
-    con = sqlite3.connect(path or os.environ.get("CARTON_DB") or DEFAULT_DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    con.execute("PRAGMA busy_timeout = 30000")
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA synchronous = FULL")
-    if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-        con.executescript(_schema())
-        con.executescript("""
-DROP TABLE IF EXISTS factory_assignments;
-DROP TABLE IF EXISTS assignment_factories;
-DROP TABLE IF EXISTS packaging_suppliers;
-DROP TABLE IF EXISTS app_meta;
-""")
-        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    # Existing v5 databases gain the restart-safe cache without rebuilding
-    # any business-data tables or views.
-    con.execute("""CREATE TABLE IF NOT EXISTS persistent_cache (
-      cache_key TEXT PRIMARY KEY, namespace TEXT NOT NULL, payload BLOB NOT NULL,
-      created_at TEXT NOT NULL, accessed_at TEXT NOT NULL)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS data_revision (
-      singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL)""")
-    con.execute("INSERT OR IGNORE INTO data_revision VALUES (1, 0)")
-    if not con.execute("SELECT 1 FROM rates LIMIT 1").fetchone():
-        with con:
-            con.executemany("INSERT INTO rates VALUES (?, ?, ?, ?)", SEED_RATES)
-    # Schema/cache bootstrapping must never leave a write transaction open;
-    # Streamlit fragments may open another connection during the same render.
-    con.commit()
+    url = url or os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL is not set.")
+    timeout = {} if "connect_timeout" in url else {"connect_timeout": 10}  # a silent server fails fast
+    con = psycopg.connect(url, autocommit=True, row_factory=_row_factory, **timeout)
+    if url not in _ready:
+        with con.transaction():
+            con.execute(_schema())
+            con.execute("INSERT INTO data_revision VALUES (1, 0) ON CONFLICT (singleton) DO NOTHING")
+            if not con.execute("SELECT 1 FROM rates LIMIT 1").fetchone():
+                con.cursor().executemany("INSERT INTO rates VALUES (%s, %s, %s, %s)", SEED_RATES)
+        _ready.add(url)
     return con
 
 
@@ -195,17 +197,17 @@ def cache_key(namespace, *parts):
 
 def cache_get(con, key):
     """Return a trusted application cache value, or None when absent/corrupt."""
-    row = con.execute("SELECT payload FROM persistent_cache WHERE cache_key = ?", (key,)).fetchone()
+    row = con.execute("SELECT payload FROM persistent_cache WHERE cache_key = %s", (key,)).fetchone()
     if not row:
         return None
     try:
         value = pickle.loads(row[0])
     except (pickle.PickleError, EOFError, AttributeError, ValueError, TypeError):
-        with con:
-            con.execute("DELETE FROM persistent_cache WHERE cache_key = ?", (key,))
+        with con.transaction():
+            con.execute("DELETE FROM persistent_cache WHERE cache_key = %s", (key,))
         return None
-    with con:
-        con.execute("UPDATE persistent_cache SET accessed_at = ? WHERE cache_key = ?",
+    with con.transaction():
+        con.execute("UPDATE persistent_cache SET accessed_at = %s WHERE cache_key = %s",
                     (datetime.now().isoformat(timespec="seconds"), key))
     return value
 
@@ -213,14 +215,18 @@ def cache_get(con, key):
 def cache_set(con, key, namespace, value, max_entries=30):
     """Persist an application-produced value and trim old namespace entries."""
     now = datetime.now().isoformat(timespec="seconds")
-    payload = sqlite3.Binary(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
-    with con:
-        con.execute("INSERT OR REPLACE INTO persistent_cache VALUES (?, ?, ?, ?, ?)",
-                    (key, namespace, payload, now, now))
+    payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    with con.transaction():
+        con.execute(
+            "INSERT INTO persistent_cache VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (cache_key) DO UPDATE SET namespace = EXCLUDED.namespace, "
+            "payload = EXCLUDED.payload, created_at = EXCLUDED.created_at, "
+            "accessed_at = EXCLUDED.accessed_at",
+            (key, namespace, payload, now, now))
         con.execute(
             "DELETE FROM persistent_cache WHERE cache_key IN ("
-            "SELECT cache_key FROM persistent_cache WHERE namespace = ? "
-            "ORDER BY accessed_at DESC LIMIT -1 OFFSET ?)",
+            "SELECT cache_key FROM persistent_cache WHERE namespace = %s "
+            "ORDER BY accessed_at DESC OFFSET %s)",
             (namespace, int(max_entries)),
         )
 
@@ -239,7 +245,7 @@ def data_revision(con):
             f"SELECT COUNT(*), COALESCE(MAX(imported_at), '') FROM {table}"
         ).fetchone())
     values.extend(con.execute(
-        "SELECT COUNT(*), COALESCE(MAX(effective_from || ':' || pacd_pct || ':' || matalan_pct), '') "
+        "SELECT COUNT(*), COALESCE(MAX(effective_from || ':' || pacd_pct::text || ':' || matalan_pct::text), '') "
         "FROM rates"
     ).fetchone())
     return f"{revision}-" + hashlib.sha256(repr(tuple(values)).encode()).hexdigest()[:16]
@@ -266,6 +272,9 @@ def _clean(value):
     return value
 
 
+_PUNCT_TO_SPACE = str.maketrans('.,;:"\'!?', " " * 8)
+
+
 def supplier_key(name):
     """Upper-cased first word of a packaging supplier name, so its spellings merge (port of the VBA FirstWord).
 
@@ -273,9 +282,7 @@ def supplier_key(name):
     """
     if name is None:
         return None
-    for ch in '.,;:"\'!?':
-        name = name.replace(ch, " ")
-    words = name.split()
+    words = name.translate(_PUNCT_TO_SPACE).split()
     return words[0].upper() if words else None
 
 
@@ -330,18 +337,29 @@ def _row_key(kind, raw, row):
     return hashlib.sha1(json.dumps(ident).encode()).hexdigest()
 
 
+def _open(src):
+    try:
+        return openpyxl.load_workbook(src, data_only=True)
+    except Exception as e:  # not an xlsx, corrupt or password protected
+        raise ImportFileError(f"Can't open the workbook: {e}") from e
+
+
+def _header_row(ws, marker, where):
+    """({normalised header: column index}, row number) of the first of rows 1-10 with a `marker` cell."""
+    for n, header_row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
+        found = {_norm(h): i for i, h in enumerate(header_row)}
+        if _norm(marker) in found:
+            return found, n
+    raise ImportFileError(f"{where} header row not found (no '{marker}' cell in rows 1-10).")
+
+
 def _find_columns(sheet, ws):
     """Return (column index per COLUMNS, header row number).
 
     The header row is the first of rows 1-10 with a 'Shipment Date' cell: row 2 in the
     master tracker (title above), row 1 in the per-supplier exports.
     """
-    for n, header_row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
-        found = {_norm(h): i for i, h in enumerate(header_row)}
-        if _norm(HEADERS["shipment_date"]) in found:
-            break
-    else:
-        raise ImportFileError(f"{sheet}: header row not found (no 'Shipment Date' cell in rows 1-10).")
+    found, n = _header_row(ws, HEADERS["shipment_date"], f"{sheet}:")
     index = {}
     for col in COLUMNS:
         index[col] = found.get(_norm(HEADERS[col]))
@@ -359,10 +377,7 @@ def read_workbook(src):
     "_row" (Excel row number), "_file" (the two date cells as they are in the file) and
     "_key" (identifies the row in later imports, for saved date corrections).
     """
-    try:
-        wb = openpyxl.load_workbook(src, data_only=True)
-    except Exception as e:  # not an xlsx, corrupt or password protected
-        raise ImportFileError(f"Can't open the workbook: {e}") from e
+    wb = _open(src)
     names = {n.upper(): n for n in wb.sheetnames}
     for sheet in SHEETS.values():
         if sheet not in names:
@@ -393,7 +408,7 @@ def _month(row):
     return row["shipment_date"][:7] if row["shipment_date"] else None
 
 
-_SAME_KEY = "supplier_key IS ? AND substr(shipment_date, 1, 7) IS ?"
+_SAME_KEY = "supplier_key IS NOT DISTINCT FROM %s AND substr(shipment_date, 1, 7) IS NOT DISTINCT FROM %s"
 
 
 def preview(con, data):
@@ -536,13 +551,13 @@ def saved_dates(con):
              "PO Received Date in file": r["file_po"], "Shipment Date in file": r["file_ship"],
              "PO Received Date": shown(r["po_received_date"]), "Shipment Date": shown(r["shipment_date"]),
              "Saved at": r["saved_at"].replace("T", " ")[:16], "key": r["row_key"]}
-            for r in con.execute("SELECT * FROM date_fixes ORDER BY saved_at DESC, rowid")]
+            for r in con.execute("SELECT * FROM date_fixes ORDER BY saved_at DESC, row_key")]
 
 
 def forget_dates(con, keys):
     """Delete saved corrections; those rows are checked again the next time they are imported."""
-    with con:
-        con.executemany("DELETE FROM date_fixes WHERE row_key = ?", [(k,) for k in keys])
+    with con.transaction():
+        con.cursor().executemany("DELETE FROM date_fixes WHERE row_key = %s", [(k,) for k in keys])
 
 
 def clashes(files):
@@ -557,9 +572,10 @@ def clashes(files):
             for (kind, supplier, month), names in sorted(seen.items(), key=str) if len(names) > 1]
 
 
-def save(con, data, source_file):
-    """Import one file. Returns the number of rows inserted per sheet."""
-    return save_many(con, {source_file: data})[source_file]
+_FIX_COLS = ["row_key", "carton_type", "packaging_supplier", "ebiz_so", "carton_qty", "file_po", "file_ship",
+             "po_received_date", "shipment_date", "saved_at"]
+_SAVE_FIX = (f"INSERT INTO date_fixes VALUES ({', '.join(['%s'] * len(_FIX_COLS))}) ON CONFLICT (row_key) DO UPDATE SET "
+             + ", ".join(f"{c} = EXCLUDED.{c}" for c in _FIX_COLS[1:]))
 
 
 def save_many(con, files):
@@ -575,15 +591,16 @@ def save_many(con, files):
             f"{c['Sheet']} {c['Supplier']} {c['Shipment month']} in {c['Files']}" for c in clash))
     now = datetime.now().isoformat(timespec="seconds")
     cols = COLUMNS + ["supplier_key", "source_file", "imported_at"]
-    with con:
+    with con.transaction():
+        cur = con.cursor()
         for name, data in files.items():
             for kind, rows in data.items():
                 table = TABLES[kind]
                 for key in {(r["supplier_key"], _month(r)) for r in rows}:
                     con.execute(f"DELETE FROM {table} WHERE {_SAME_KEY}", key)
-                con.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                cur.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
                                 [[r[c] for c in COLUMNS] + [r["supplier_key"], name, now] for r in rows])
-                con.executemany("INSERT OR REPLACE INTO date_fixes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                cur.executemany(_SAVE_FIX,
                                 [(r["_key"], kind, r["packaging_supplier"], r["ebiz_so"], r["carton_qty"],
                                   _shown(r["_file"]["po_received_date"]), _shown(r["_file"]["shipment_date"]),
                                   r["po_received_date"], r["shipment_date"], now)
@@ -617,17 +634,8 @@ def read_ebiz(src):
     Order Number "A|B" gives so_1 "A" and so_2 "B"; vendor_key is supplier_key(vendor). Blank rows and rows
     with no Vendor (total lines) are skipped.
     """
-    try:
-        wb = openpyxl.load_workbook(src, data_only=True)
-    except Exception as e:  # not an xlsx, corrupt or password protected
-        raise ImportFileError(f"Can't open the workbook: {e}") from e
-    ws = wb.worksheets[0]
-    for n, header_row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
-        found = {_norm(h): i for i, h in enumerate(header_row)}
-        if _norm(EBIZ_HEADERS["order_number"]) in found:
-            break
-    else:
-        raise ImportFileError("eBiz header row not found (no 'Order Number' cell in rows 1-10).")
+    ws = _open(src).worksheets[0]
+    found, n = _header_row(ws, EBIZ_HEADERS["order_number"], "eBiz")
     index = {c: found.get(_norm(h)) for c, h in EBIZ_HEADERS.items()}
     for col in EBIZ_REQUIRED:
         if index[col] is None:
@@ -683,10 +691,10 @@ def replace_ebiz(con, files):
         raise ValueError("Files overlap: " + "; ".join(f"{c['Vendor']} in {c['Files']}" for c in clash))
     now = datetime.now().isoformat(timespec="seconds")
     cols = EBIZ_COLUMNS + ["source_file", "imported_at"]
-    with con:
+    with con.transaction():
         con.execute("DELETE FROM ebiz")
         for name, rows in files.items():
-            con.executemany(f"INSERT INTO ebiz ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            con.cursor().executemany(f"INSERT INTO ebiz ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
                             [[r[c] for c in EBIZ_COLUMNS] + [name, now] for r in rows])
         _bump_revision(con)
     return {name: len(rows) for name, rows in files.items()}
@@ -704,7 +712,7 @@ def ebiz_status(con):
 def ebiz_vendors(con):
     """Vendor keys in the eBiz data, sorted."""
     return [r[0] for r in con.execute(
-        "SELECT DISTINCT vendor_key FROM ebiz WHERE vendor_key IS NOT NULL ORDER BY 1")]
+        'SELECT DISTINCT vendor_key COLLATE "C" FROM ebiz WHERE vendor_key IS NOT NULL ORDER BY 1')]
 
 
 def so_order(so):
@@ -727,7 +735,7 @@ def cross_reference(con, supplier):
     """
     rows = {}
     for kind in TABLES:
-        found = [dict(r) for r in con.execute(f"SELECT * FROM v_{kind.lower()} WHERE supplier_key IS ?",
+        found = [dict(r) for r in con.execute(f"SELECT * FROM v_{kind.lower()} WHERE supplier_key IS NOT DISTINCT FROM %s",
                                               (supplier,))]
         for r in found:
             r["so"] = _so(r["ebiz_so"])
@@ -740,7 +748,7 @@ def cross_reference(con, supplier):
             o["tracker_qty"] += r["carton_qty"] or 0
             o["tracker_rebate"] += (r["pacd"] or 0) + (r["matalan_rebate"] or 0)
     ebiz_only = []
-    for e in (dict(r) for r in con.execute("SELECT * FROM ebiz WHERE vendor_key IS ? ORDER BY id", (supplier,))):
+    for e in (dict(r) for r in con.execute("SELECT * FROM ebiz WHERE vendor_key IS NOT DISTINCT FROM %s ORDER BY id", (supplier,))):
         if e["so_1"] in orders:
             e["key"], via_so2 = e["so_1"], False
         elif e["so_2"] in orders:
@@ -828,9 +836,9 @@ def save_rates(con, rates):
             raise ValueError(f"Row {i}: duplicate {kind} rate for {start}.")
         seen.add((kind, start))
         rows.append((kind, start, float(pcts[0]), float(pcts[1])))
-    with con:
+    with con.transaction():
         con.execute("DELETE FROM rates")
-        con.executemany("INSERT INTO rates VALUES (?, ?, ?, ?)", rows)
+        con.cursor().executemany("INSERT INTO rates VALUES (%s, %s, %s, %s)", rows)
         n, first = _unrated(con)
         if n:  # raising here rolls the transaction back
             raise ValueError(f"{n} shipment(s) from {first} on would have no rate. "
@@ -848,16 +856,16 @@ def quarter_label(fiscal_year, quarter):
 def _where(supplier=None, suppliers=None, fiscal_year=None, quarters=None):
     sql, params = ["shipment_date IS NOT NULL"], []
     if supplier is not None:
-        sql.append("supplier_key = ?")
+        sql.append("supplier_key = %s")
         params.append(supplier)
     if suppliers:
-        sql.append(f"supplier_key IN ({', '.join('?' * len(suppliers))})")
+        sql.append(f"supplier_key IN ({', '.join(['%s'] * len(suppliers))})")
         params += list(suppliers)
     if fiscal_year is not None:
-        sql.append("fiscal_year = ?")
+        sql.append("fiscal_year = %s")
         params.append(fiscal_year)
     if quarters:
-        sql.append(f"quarter IN ({', '.join('?' * len(quarters))})")
+        sql.append(f"quarter IN ({', '.join(['%s'] * len(quarters))})")
         params += list(quarters)
     return " AND ".join(sql), params
 
@@ -880,7 +888,7 @@ def _editable_search(search):
         return "", []
     value = f"%{str(search).strip().lower()}%"
     columns = ["id", *COLUMNS, "source_file", "imported_at"]
-    return ("(" + " OR ".join(f"LOWER(CAST({col} AS TEXT)) LIKE ?" for col in columns) + ")",
+    return ("(" + " OR ".join(f"LOWER(CAST({col} AS TEXT)) LIKE %s" for col in columns) + ")",
             [value] * len(columns))
 
 
@@ -894,7 +902,7 @@ def editable_rows(con, kind, supplier=None, limit=None, offset=0, search=None):
         raise ValueError("Carton type must be STD or CUS.")
     clauses, params = [], []
     if supplier is not None:
-        clauses.append("supplier_key IS ?")
+        clauses.append("supplier_key IS NOT DISTINCT FROM %s")
         params.append(supplier)
     search_sql, search_params = _editable_search(search)
     if search_sql:
@@ -903,7 +911,7 @@ def editable_rows(con, kind, supplier=None, limit=None, offset=0, search=None):
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paging = ""
     if limit is not None:
-        paging = " LIMIT ? OFFSET ?"
+        paging = " LIMIT %s OFFSET %s"
         params += [int(limit), int(offset)]
     return [dict(r) for r in con.execute(
         f"SELECT id, {', '.join(COLUMNS)}, supplier_key, source_file, imported_at "
@@ -917,7 +925,7 @@ def editable_row_count(con, kind, supplier=None, search=None):
         raise ValueError("Carton type must be STD or CUS.")
     clauses, params = [], []
     if supplier is not None:
-        clauses.append("supplier_key IS ?")
+        clauses.append("supplier_key IS NOT DISTINCT FROM %s")
         params.append(supplier)
     search_sql, search_params = _editable_search(search)
     if search_sql:
@@ -965,7 +973,7 @@ def update_tracker_rows(con, kind, edited):
         if row_id in seen:
             raise ValueError(f"Row {number}: duplicate row ID {row_id}.")
         seen.add(row_id)
-        if not con.execute(f"SELECT 1 FROM {table} WHERE id = ?", (row_id,)).fetchone():
+        if not con.execute(f"SELECT 1 FROM {table} WHERE id = %s", (row_id,)).fetchone():
             raise ValueError(f"Row {number}: row ID {row_id} no longer exists. Refresh the page.")
 
         values = []
@@ -973,37 +981,24 @@ def update_tracker_rows(con, kind, edited):
             value = _clean(item.get(col))
             if col in DATE_COLS:
                 value = _manual_date(value, number, HEADERS[col])
-            elif col in INT_COLS:
-                if value is None or value == "":
-                    value = None
-                else:
-                    try:
-                        value = int(round(float(value)))
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            f"Row {number}: {HEADERS[col]} must be a number.") from None
-            elif col in REAL_COLS:
-                if value is None or value == "":
-                    value = None
-                else:
-                    try:
-                        value = float(value)
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            f"Row {number}: {HEADERS[col]} must be a number.") from None
+            elif value is None:
+                pass
+            elif col in INT_COLS or col in REAL_COLS:
+                try:
+                    value = int(round(float(value))) if col in INT_COLS else float(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Row {number}: {HEADERS[col]} must be a number.") from None
             else:
-                value = _clean(value)
-                if value is not None:
-                    value = str(value)
+                value = str(value)
             values.append(value)
         key = supplier_key(values[COLUMNS.index("packaging_supplier")])
         prepared.append(values + [key, row_id])
 
-    assignments = ", ".join(f"{col} = ?" for col in COLUMNS)
+    assignments = ", ".join(f"{col} = %s" for col in COLUMNS)
     now = datetime.now().isoformat(timespec="seconds")
-    with con:
-        con.executemany(
-            f"UPDATE {table} SET {assignments}, supplier_key = ?, imported_at = ? WHERE id = ?",
+    with con.transaction():
+        con.cursor().executemany(
+            f"UPDATE {table} SET {assignments}, supplier_key = %s, imported_at = %s WHERE id = %s",
             [values[:-1] + [now, values[-1]] for values in prepared])
         _bump_revision(con)
     return len(prepared)
@@ -1049,9 +1044,8 @@ def summary_rows(con, fiscal_year, supplier=None):
 
 def cross_reference_overview(con):
     """One live Tracker-vs-eBiz status summary per packaging supplier."""
-    keys = sorted(set(tracker_suppliers(con)) | set(ebiz_vendors(con)))
     overview = []
-    for key in keys:
+    for key in reconciliation_suppliers(con):
         data = cross_reference(con, key)
         statuses = {label: 0 for label in ("Match", "Not in eBiz", "Tracker > eBiz", "Tracker < eBiz")}
         for order in data["orders"]:
@@ -1072,7 +1066,7 @@ def suppliers(con):
     """Supplier keys of the dated rows, sorted."""
     src, params = _dated()
     return [r[0] for r in con.execute(
-        f"SELECT DISTINCT supplier_key FROM {src} WHERE supplier_key IS NOT NULL ORDER BY 1", params)]
+        f"SELECT DISTINCT supplier_key COLLATE \"C\" FROM {src} WHERE supplier_key IS NOT NULL ORDER BY 1", params)]
 
 
 def tracker_suppliers(con):
@@ -1080,7 +1074,12 @@ def tracker_suppliers(con):
     sql = " UNION ".join(
         f"SELECT supplier_key FROM {table} WHERE supplier_key IS NOT NULL"
         for table in TABLES.values())
-    return [r[0] for r in con.execute(f"SELECT supplier_key FROM ({sql}) ORDER BY 1")]
+    return [r[0] for r in con.execute(f'SELECT supplier_key FROM ({sql}) ORDER BY supplier_key COLLATE "C"')]
+
+
+def reconciliation_suppliers(con):
+    """Supplier keys found in the tracker or in eBiz, sorted."""
+    return sorted(set(tracker_suppliers(con)) | set(ebiz_vendors(con)))
 
 
 def supplier_name(con, key):
@@ -1089,19 +1088,19 @@ def supplier_name(con, key):
         f"SELECT packaging_supplier, supplier_key FROM {table}" for table in TABLES.values())
     row = con.execute(
         f"SELECT packaging_supplier FROM ({src}) "
-        "WHERE supplier_key IS ? AND packaging_supplier IS NOT NULL "
-        "GROUP BY packaging_supplier ORDER BY COUNT(*) DESC, packaging_supplier LIMIT 1",
+        "WHERE supplier_key IS NOT DISTINCT FROM %s AND packaging_supplier IS NOT NULL "
+        'GROUP BY packaging_supplier ORDER BY COUNT(*) DESC, packaging_supplier COLLATE "C" LIMIT 1',
         (key,)).fetchone()
     if row:
         return row[0]
     row = con.execute(
-        "SELECT vendor FROM ebiz WHERE vendor_key IS ? AND vendor IS NOT NULL "
-        "GROUP BY vendor ORDER BY COUNT(*) DESC, vendor LIMIT 1", (key,)).fetchone()
+        "SELECT vendor FROM ebiz WHERE vendor_key IS NOT DISTINCT FROM %s AND vendor IS NOT NULL "
+        'GROUP BY vendor ORDER BY COUNT(*) DESC, vendor COLLATE "C" LIMIT 1', (key,)).fetchone()
     return row[0] if row else key
 
 
-def fiscal_years(con):
-    src, params = _dated()
+def fiscal_years(con, **filters):
+    src, params = _dated(**filters)
     return [r[0] for r in con.execute(f"SELECT DISTINCT fiscal_year FROM {src} ORDER BY 1", params)]
 
 
@@ -1142,7 +1141,7 @@ def quarter_rates(con, kind, supplier, fiscal_year):
     out = {}
     for q, n_pacd, pacd, n_matalan, matalan, unrated in con.execute(
             f"SELECT quarter, COUNT(DISTINCT pacd_pct), MIN(pacd_pct), COUNT(DISTINCT matalan_pct), "
-            f"MIN(matalan_pct), SUM(pacd_pct IS NULL) FROM v_{kind.lower()} WHERE {where} GROUP BY quarter", params):
+            f"MIN(matalan_pct), COUNT(*) FILTER (WHERE pacd_pct IS NULL) FROM v_{kind.lower()} WHERE {where} GROUP BY quarter", params):
         out[q] = (pacd if n_pacd == 1 and not unrated else None, matalan if n_matalan == 1 and not unrated else None)
     return out
 

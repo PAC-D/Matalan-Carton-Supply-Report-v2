@@ -7,11 +7,11 @@
 | **Status** | In development |
 | **Last updated** | 2026-10-22 |
 | **Owner** | PAC-D |
-| **Source** | `docs/superpowers/specs/2026-10-07-carton-tracker-design.md`, `docs/superpowers/specs/2026-10-08-ebiz-discrepancy-design.md` |
+| **Source** | Original design specs, in Git history before the docs cleanup (`docs/superpowers/specs/`) |
 
 ## 1. Purpose
 
-Provide a responsive, hosted-capable web application that replaces the tracker-reporting and eBiz reconciliation parts of `eBiz Report Generator.xlsm`. The application imports and edits Matalan carton shipment tracker data in SQLite, applies date-effective rates, reconciles tracker Sales Orders against eBiz exports, and produces print-ready Excel and PDF reports.
+Provide a responsive, hosted-capable web application that replaces the tracker-reporting and eBiz reconciliation parts of `eBiz Report Generator.xlsm`. The application imports and edits Matalan carton shipment tracker data in PostgreSQL, applies date-effective rates, reconciles tracker Sales Orders against eBiz exports, and produces print-ready Excel and PDF reports.
 
 ## 2. Scope
 
@@ -49,7 +49,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | Python | 3.14 (tested with 3.14.6) |
 | Runtime packages | `openpyxl` 3.1.5, `pandas` 3.0.5, `reportlab` 5.0.0, `streamlit` 1.61.1 |
 | Test packages | `pypdf` 6.16.0, `pytest` 9.1.1 |
-| Database | SQLite via the Python standard library; file `carton.db` beside the app |
+| Database | PostgreSQL 16+ via psycopg 3; production uses AWS RDS `database-1`, database `matalan_carton` |
 | Network | Localhost during development; hosted behind an authenticated HTTPS reverse proxy in production |
 
 ## 4. Definitions
@@ -75,11 +75,11 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 
 | ID | Requirement |
 |---|---|
-| FR-DB-01 | On first start, the system shall create `carton.db` with the current schema (version 5) and seed the default rates. |
-| FR-DB-02 | On start, the system shall upgrade an older database schema without deleting existing tracker, rate, date-correction, or eBiz data where those tables exist. |
+| FR-DB-01 | On first connect, the system shall create any missing tables and views and seed the default rates when the rates table is empty. |
+| FR-DB-02 | Schema creation shall never delete existing tracker, rate, date-correction, or eBiz data. |
 | FR-DB-03 | The system shall store tracker data in `track_std` and `track_cus`, rates in `rates`, saved date corrections in `date_fixes`, and eBiz data in `ebiz`. |
 | FR-DB-04 | The system shall expose rate-aware views `v_std` and `v_cus` with PACD, Matalan rebate, fiscal year, and quarter calculated at query time. |
-| FR-DB-05 | The database path shall default to `carton.db` beside the app and may be overridden by the `CARTON_DB` environment variable. |
+| FR-DB-05 | The database connection shall come from the `DATABASE_URL` environment variable; production connections shall verify the RDS TLS certificate (`sslmode=verify-full`). |
 
 ### 5.2 Tracker import
 
@@ -214,7 +214,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | FR-UI-09 | The system shall show actionable error messages for import errors, report errors, and missing data. |
 | FR-UI-10 | The website shall use both supplied logos and remain usable on desktop, laptop, tablet, and phone widths. |
 | FR-UI-11 | The Dashboard shall provide fiscal-year and packaging-supplier filters and show total cartons, Standard/Custom carton totals, quarterly packaging-supplier volumes, the detailed Summary rows, and Tracker-to-eBiz reconciliation. |
-| FR-UI-12 | The repository shall include a non-root Docker image, persistent SQLite volume, report volume, health check, and nginx reverse-proxy template. |
+| FR-UI-12 | The repository shall include a non-root Docker image, report volume, health check, and nginx reverse-proxy template. |
 | FR-UI-13 | Dashboard Summary values and the generated Summary Excel workbook shall use the same calculation source so their supplier, quarter, carton-type, rate and amount values remain consistent. |
 | FR-UI-14 | The Reports navigation group shall include dedicated Cross Reference, Discrepancy Report and Rebate Report pages. |
 | FR-UI-15 | The live Rebate Report shall filter by packaging supplier, fiscal year and quarter; show Standard and Custom detail rows and totals; and allow the current PDF to be prepared for download. |
@@ -257,7 +257,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 
 - The database persists between sessions.
 - Source file names and import timestamps are retained on tracker and eBiz rows for traceability.
-- The user is responsible for backing up `carton.db`; generated files under `Reports/` can be rebuilt from the database.
+- RDS automated backups protect the database; generated files under `Reports/` can be rebuilt from the database.
 
 ## 7. Non-functional requirements
 
@@ -265,13 +265,13 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 |---|---|
 | NFR-01 | The same application shall run locally for development and as one persistent hosted container. |
 | NFR-02 | Local Streamlit shall bind to localhost; the container shall bind internally to `0.0.0.0` and be published only to the host loopback interface for reverse proxying. |
-| NFR-03 | Tracker and eBiz data shall remain in the configured SQLite database; the app shall not send data to an external application service. |
+| NFR-03 | Tracker and eBiz data shall remain in the configured PostgreSQL database; the app shall not send data to an external application service. |
 | NFR-04 | Tracker imports and eBiz replacement shall be atomic: a failure shall not leave a partially updated database. |
 | NFR-05 | Schema upgrades shall preserve existing data and run automatically at startup. |
 | NFR-06 | Reports shall be generated on demand from current database values; rate changes shall not require re-importing tracker rows. |
 | NFR-07 | Generated filenames shall be safe on Windows and shall identify the supplier and period where applicable. |
 | NFR-08 | Excel reports shall be print-ready (page setup, margins, headers/footers, repeated titles) and PDFs shall include page numbering and generation timestamps. |
-| NFR-09 | The implementation shall use SQLite from the Python standard library and shall not require a database server or ORM. |
+| NFR-09 | The implementation shall use PostgreSQL through psycopg 3 without an ORM. |
 | NFR-10 | Runtime and test dependencies shall be pinned in `requirements.txt`. |
 | NFR-11 | The automated test suite shall cover database logic, tracker import, date review, rates, live Summary calculations, report generation, eBiz import, reconciliation, tracker editing, and UI smoke tests. |
 | NFR-12 | The application shall run on Windows 10/11 with Python 3.14 and the pinned dependencies. |
@@ -279,7 +279,7 @@ Provide a responsive, hosted-capable web application that replaces the tracker-r
 | NFR-14 | The project shall be distributed under the Mozilla Public License 2.0. |
 | NFR-15 | Primary workflows and navigation shall be responsive at desktop, tablet and phone widths. |
 | NFR-16 | A production deployment shall terminate TLS and enforce authentication before exposing the app to the internet. |
-| NFR-17 | The SQLite deployment shall run as one application instance; horizontal scaling requires a database migration. |
+| NFR-17 | The deployment shall run as one application instance; scaling out requires connection pooling. |
 
 ## 8. Acceptance criteria
 

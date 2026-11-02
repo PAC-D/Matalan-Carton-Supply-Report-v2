@@ -6,14 +6,10 @@ import reports
 from web_ui import header, interactive_kpi_grid, page, search_frame, table_search
 
 
-def reconciliation_suppliers(con):
-    return sorted(set(core.tracker_suppliers(con)) | set(core.ebiz_vendors(con)))
-
-
-@page("Cross reference")
+@page
 def main():
     con = core.connect()
-    suppliers = reconciliation_suppliers(con)
+    suppliers = core.reconciliation_suppliers(con)
     status = core.ebiz_status(con)
     header(
         "Cross reference",
@@ -29,7 +25,7 @@ def main():
 
     supplier = st.selectbox(
         "Packaging supplier", suppliers,
-        format_func=lambda key: core.supplier_name(con, key),
+        format_func={key: core.supplier_name(con, key) for key in suppliers}.get,
         key="cross_reference_supplier",
     )
     xref = core.cross_reference(con, supplier)

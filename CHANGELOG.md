@@ -15,10 +15,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Editable tracker page for all imported `TRACK_STD` and `TRACK_CUS` source fields, with supplier filters and 250-row pagination.
 - Transactional tracker-edit validation, including manual `YYYY-MM-DD` and `DD/MM/YYYY` dates and recalculation of supplier keys.
 - Dockerfile, Docker Compose persistence, health check, and nginx reverse-proxy template for hosted deployment.
-- `CODEX.md` architecture and deployment handoff log.
 
 ### Changed
 
+- Storage moved from SQLite to PostgreSQL (psycopg 3). The connection comes from `DATABASE_URL`, which replaces `CARTON_DB`; production uses AWS RDS `database-1` over verified TLS.
+- The hosted URL prefix is now `/carton-supply-report/` (Streamlit base path, Docker health check, nginx template).
+- Pages no longer hold their database connection inside widget format functions, so open browser tabs do not keep connections open.
 - `app.py` is now the website router; feature UI is separated into page modules.
 - Dashboard spacing, KPI density and chart sizing were redesigned for a compact modern layout without overlapping graph content.
 - Dashboard filters now select fiscal year and packaging suppliers; all dashboard Summary values use the same aggregation source as the generated Summary Excel workbook. `assets/favicon.png` is the browser tab icon.
