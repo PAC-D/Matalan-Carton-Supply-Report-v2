@@ -42,15 +42,24 @@ def report_controls():
                                 help="Compares all tracker rows with eBiz; period filters do not apply.")
 
     key = (tuple(picked), year, tuple(chosen), with_disc)
+    artifact_key = core.cache_key("built-reports-v1", key, core.data_revision(con))
+    if "built_reports" not in st.session_state:
+        cached = core.cache_get(con, artifact_key)
+        if cached is not None:
+            st.session_state["built_reports"] = (key, *cached)
     with st.container(horizontal=True):
         build = st.button("Build reports", type="primary", icon=":material/package_2:")
         save = st.button("Save to Reports folder", icon=":material/save:")
     if build:
         with st.spinner("Building reports…"):
-            items = reports.build_all(con, picked, year, chosen, discrepancy=with_disc)
-            month = reports.month_name(con, picked, year, chosen)
-            st.session_state["built_reports"] = (
-                key, items, reports.to_zip(items), f"Matalan Carton Reports_{month} {year}.zip")
+            cached = core.cache_get(con, artifact_key)
+            if cached is None:
+                items = reports.build_all(con, picked, year, chosen, discrepancy=with_disc)
+                month = reports.month_name(con, picked, year, chosen)
+                cached = (items, reports.to_zip(items),
+                          f"Matalan Carton Reports_{month} {year}.zip")
+                core.cache_set(con, artifact_key, "built-reports-v1", cached, max_entries=12)
+            st.session_state["built_reports"] = (key, *cached)
     if save:
         try:
             with st.spinner("Building reports…"):

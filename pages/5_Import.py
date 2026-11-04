@@ -12,18 +12,41 @@ DATE_EDITS = {
 }
 
 
-@st.cache_data(max_entries=20, show_spinner="Reading tracker workbook…")
-def read_upload(content):
-    return core.read_workbook(BytesIO(content))
-
-
-@st.cache_data(max_entries=20, show_spinner="Reading eBiz export…")
-def read_ebiz_upload(content):
-    return core.read_ebiz(BytesIO(content))
+def read_cached_upload(con, content, kind):
+    """Parse once and keep the validated result in the persistent PostgreSQL cache."""
+    namespace = f"upload-{kind}-v1"
+    key = core.cache_key(namespace, content)
+    cached = core.cache_get(con, key)
+    if cached is not None:
+        return cached, True
+    parsed = (core.read_workbook(BytesIO(content)) if kind == "tracker"
+              else core.read_ebiz(BytesIO(content)))
+    core.cache_set(con, key, namespace, parsed, max_entries=20)
+    return parsed, False
 
 
 def as_date(value):
     return None if pd.isna(value) else pd.Timestamp(value).date()
+
+
+def _read_uploads(con, uploads, kind):
+    files, failures = {}, 0
+    if not uploads:
+        return files
+    label = "tracker" if kind == "tracker" else "eBiz"
+    with st.spinner(f"Validating {label} uploads…"):
+        for upload in uploads:
+            try:
+                files[upload.name], cached = read_cached_upload(con, upload.getvalue(), kind)
+                st.write(f"✓ {upload.name} — {'restored from cache' if cached else 'validated'}")
+            except core.ImportFileError as exc:
+                failures += 1
+                st.error(f"{upload.name}: {exc} This file will not be imported.")
+    if failures:
+        st.error(f"Validation finished with {failures} failed file(s).")
+    else:
+        st.success(f"{len(files)} {label} file(s) ready to import.")
+    return files
 
 
 def tracker_import(con):
@@ -33,12 +56,7 @@ def tracker_import(con):
         uploads = st.file_uploader("Tracker workbooks", type=["xlsx", "xlsm"],
                                    accept_multiple_files=True, key="tracker_upload",
                                    label_visibility="collapsed")
-        files = {}
-        for upload in uploads or []:
-            try:
-                files[upload.name] = read_upload(upload.getvalue())
-            except core.ImportFileError as exc:
-                st.error(f"{upload.name}: {exc} This file will not be imported.")
+        files = _read_uploads(con, uploads, "tracker")
         if files:
             reused, issues = core.check_dates(con, files)
             if reused:
@@ -73,12 +91,18 @@ def tracker_import(con):
                 st.dataframe(pd.DataFrame(clash), hide_index=True)
             if st.button("Confirm tracker import", type="primary", disabled=bool(clash),
                          icon=":material/upload:"):
-                counts = core.save_many(con, files)
-                clear_built_reports()
-                total = sum(sum(c.values()) for c in counts.values())
-                st.toast(f"Imported {total:,} tracker rows", icon=":material/check_circle:")
-                if core.unrated_count(con):
-                    st.warning("Some shipments are earlier than the first rate. Add an earlier rate.")
+                try:
+                    with st.spinner("Saving tracker data…"):
+                        counts = core.save_many(con, files)
+                        total = sum(sum(c.values()) for c in counts.values())
+                except Exception as exc:
+                    st.error(f"Tracker import failed. No partial changes were saved. {exc}")
+                else:
+                    clear_built_reports()
+                    st.success(f"Import finished: {total:,} tracker rows are saved.")
+                    st.toast(f"Imported {total:,} tracker rows", icon=":material/check_circle:")
+                    if core.unrated_count(con):
+                        st.warning("Some shipments are earlier than the first rate. Add an earlier rate.")
 
     saved = core.saved_dates(con)
     if saved:
@@ -105,12 +129,7 @@ def ebiz_import(con):
         uploads = st.file_uploader("eBiz exports", type=["xlsx", "xlsm"],
                                    accept_multiple_files=True, key="ebiz_upload",
                                    label_visibility="collapsed")
-        files = {}
-        for upload in uploads or []:
-            try:
-                files[upload.name] = read_ebiz_upload(upload.getvalue())
-            except core.ImportFileError as exc:
-                st.error(f"{upload.name}: {exc} This file will not be imported.")
+        files = _read_uploads(con, uploads, "ebiz")
         if not files:
             return
         st.dataframe(pd.DataFrame(core.ebiz_preview(files)), hide_index=True)
@@ -128,10 +147,17 @@ def ebiz_import(con):
         st.caption(f"Replacement deletes all {status[0] if status else 0:,} current eBiz rows first.")
         if st.button("Replace all eBiz data", type="primary", disabled=bool(clash),
                      icon=":material/sync:"):
-            counts = core.replace_ebiz(con, files)
-            clear_built_reports()
-            st.toast(f"Loaded {sum(counts.values()):,} eBiz rows", icon=":material/check_circle:")
-            st.rerun()
+            try:
+                with st.spinner("Replacing eBiz data…"):
+                    counts = core.replace_ebiz(con, files)
+                    total = sum(counts.values())
+            except Exception as exc:
+                st.error(f"eBiz import failed. Existing eBiz data is unchanged. {exc}")
+            else:
+                clear_built_reports()
+                st.session_state["import_flash"] = (
+                    f"Replacement finished: {total:,} eBiz rows are saved.")
+                st.rerun()
 
 
 @page
@@ -140,6 +166,9 @@ def main():
     tracker_count = sum(core.editable_row_count(con, kind) for kind in core.TABLES)
     header("Data import", "Validate and import tracker workbooks and eBiz vendor exports.",
            "Tracker rows", f"{tracker_count:,}")
+    if message := st.session_state.pop("import_flash", None):
+        st.success(message, icon=":material/check_circle:")
+        st.toast(message, icon=":material/check_circle:")
     tracker_import(con)
     ebiz_import(con)
 

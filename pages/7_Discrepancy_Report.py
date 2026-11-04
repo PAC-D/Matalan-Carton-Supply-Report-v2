@@ -3,15 +3,9 @@ import streamlit as st
 
 import core
 import reports
-from web_ui import header, kpi_grid, page
+from web_ui import header, interactive_kpi_grid, page, search_frame, table_search
 
 TRACKER_COLUMNS = [column for column in core.COLUMNS if column != "note"] + ["pacd", "matalan_rebate"]
-SECTIONS = [
-    ("Not in eBiz", "Tracker orders not found in eBiz"),
-    ("Tracker > eBiz", "Tracker quantity is greater"),
-    ("Tracker < eBiz", "Tracker quantity is lower"),
-    (None, "Tracker rows without SO#"),
-]
 
 
 def tracker_frame(rows, carton_type, orders, include_ebiz=False):
@@ -34,6 +28,10 @@ def tracker_frame(rows, carton_type, orders, include_ebiz=False):
 def show_tracker_rows(frame, key):
     if frame.empty:
         st.info("No discrepancies found.")
+        return
+    frame = search_frame(frame, table_search("Search discrepancy rows", f"{key}_search"))
+    if frame.empty:
+        st.info("No discrepancy rows match your search.")
         return
     st.dataframe(
         frame, hide_index=True, height=min(620, 38 + 35 * len(frame)),
@@ -67,51 +65,51 @@ def main():
     if not status:
         st.warning("No eBiz data is loaded. Tracker orders will appear as not found in eBiz.")
 
-    supplier = st.selectbox(
-        "Packaging supplier", suppliers,
-        format_func={key: core.supplier_name(con, key) for key in suppliers}.get,
-        key="discrepancy_supplier",
-    )
+    names = {key: core.supplier_name(con, key) for key in suppliers}
+    duplicates = {name for name in names.values()
+                  if sum(value == name for value in names.values()) > 1}
+    supplier_options = {
+        f"{name} ({key})" if name in duplicates else name: key
+        for key, name in names.items()
+    }
+    supplier_label = st.selectbox(
+        "Packaging supplier", list(supplier_options), key="discrepancy_supplier")
+    supplier = supplier_options[supplier_label]
     xref = core.cross_reference(con, supplier)
     orders = {order["so"]: order for order in xref["orders"]}
     order_counts = {label: sum(order["status"] == label for order in xref["orders"])
                     for label in ("Not in eBiz", "Tracker > eBiz", "Tracker < eBiz")}
     no_so = sum(1 for rows in xref["rows"].values() for row in rows if not row["so"])
-    kpi_grid([
-        {"label": "Missing orders", "value": f"{order_counts['Not in eBiz']:,}",
-         "tone": "warn" if order_counts["Not in eBiz"] else "ok"},
-        {"label": "Tracker > eBiz", "value": f"{order_counts['Tracker > eBiz']:,}",
-         "tone": "warn" if order_counts["Tracker > eBiz"] else "ok"},
-        {"label": "Tracker < eBiz", "value": f"{order_counts['Tracker < eBiz']:,}",
-         "tone": "warn" if order_counts["Tracker < eBiz"] else "ok"},
-        {"label": "Rows without SO#", "value": f"{no_so:,}",
-         "tone": "warn" if no_so else "ok"},
-        {"label": "eBiz-only rows", "value": f"{len(xref['ebiz_only']):,}",
-         "tone": "warn" if xref["ebiz_only"] else "ok"},
-    ])
+    active = interactive_kpi_grid([
+        {"id": "missing", "label": "Missing orders",
+         "value": f"{order_counts['Not in eBiz']:,}"},
+        {"id": "greater", "label": "Tracker > eBiz",
+         "value": f"{order_counts['Tracker > eBiz']:,}"},
+        {"id": "lower", "label": "Tracker < eBiz",
+         "value": f"{order_counts['Tracker < eBiz']:,}"},
+        {"id": "no_so", "label": "Rows without SO#", "value": f"{no_so:,}"},
+        {"id": "ebiz_only", "label": "eBiz-only rows",
+         "value": f"{len(xref['ebiz_only']):,}"},
+    ], "discrepancy", default="missing")
 
-    labels = [title for _, title in SECTIONS] + ["eBiz orders not found in Tracker"]
-    tabs = st.tabs(labels)
-    for tab, (wanted, title) in zip(tabs[:4], SECTIONS):
-        with tab:
-            selected = []
-            for kind, carton_type in (("STD", "Standard"), ("CUS", "Custom")):
-                rows = [row for row in xref["rows"][kind]
-                        if (orders[row["so"]]["status"] if row["so"] else None) == wanted]
-                selected.append(tracker_frame(
-                    rows, carton_type, orders,
-                    include_ebiz=wanted in ("Tracker > eBiz", "Tracker < eBiz"),
-                ))
-            frames = [frame for frame in selected if not frame.empty]
-            show_tracker_rows(pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(),
-                              f"discrepancy_{wanted or 'no_so'}")
-
-    with tabs[4]:
+    section = {
+        "missing": ("Not in eBiz", "Tracker orders not found in eBiz"),
+        "greater": ("Tracker > eBiz", "Tracker quantity is greater"),
+        "lower": ("Tracker < eBiz", "Tracker quantity is lower"),
+        "no_so": (None, "Tracker rows without SO#"),
+    }
+    if active == "ebiz_only":
+        st.subheader("eBiz orders not found in Tracker")
         if xref["ebiz_only"]:
             frame = pd.DataFrame(xref["ebiz_only"])
             shown = list(core.EBIZ_HEADERS)
             frame = frame[shown].rename(columns=core.EBIZ_HEADERS)
-            st.dataframe(
+            frame = search_frame(frame, table_search(
+                "Search eBiz-only rows", "discrepancy_ebiz_only_search"))
+            if frame.empty:
+                st.info("No eBiz-only rows match your search.")
+            else:
+                st.dataframe(
                 frame, hide_index=True, height=min(620, 38 + 35 * len(frame)),
                 column_config={
                     "Vendor": st.column_config.TextColumn(pinned=True),
@@ -120,16 +118,45 @@ def main():
                     "Current Gross Price per 1000": st.column_config.NumberColumn(format="$ %.2f"),
                     "Total Rebate": st.column_config.NumberColumn(format="$ %.2f"),
                 },
-                key="discrepancy_ebiz_only",
-            )
+                    key="discrepancy_ebiz_only",
+                )
         else:
             st.info("No discrepancies found.")
+    else:
+        wanted, title = section[active]
+        st.subheader(title)
+        selected = []
+        for kind, carton_type in (("STD", "Standard"), ("CUS", "Custom")):
+            rows = [row for row in xref["rows"][kind]
+                    if (orders[row["so"]]["status"] if row["so"] else None) == wanted]
+            selected.append(tracker_frame(
+                rows, carton_type, orders,
+                include_ebiz=wanted in ("Tracker > eBiz", "Tracker < eBiz"),
+            ))
+        frames = [frame for frame in selected if not frame.empty]
+        show_tracker_rows(pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(),
+                          f"discrepancy_{active}")
 
-    build_key = supplier
+    tracker_rows = [row for rows in xref["rows"].values() for row in rows]
+    tracker_revision = max((row["imported_at"] or "" for row in tracker_rows), default="")
+    tracker_totals = (
+        sum(row["carton_qty"] or 0 for row in tracker_rows),
+        round(sum((row["pacd"] or 0) + (row["matalan_rebate"] or 0)
+                  for row in tracker_rows), 2),
+    )
+    build_key = (supplier, status[2] if status else None, tracker_revision, tracker_totals)
+    artifact_key = core.cache_key("discrepancy-report-v2", build_key, core.data_revision(con))  # v2: [PDF, Excel]
+    if "live_discrepancy_pdf" not in st.session_state:
+        cached = core.cache_get(con, artifact_key)
+        if cached is not None:
+            st.session_state["live_discrepancy_pdf"] = (build_key, cached)
     if st.button("Prepare Discrepancy Report", icon=":material/description:"):
-        with st.spinner("Building PDF and Excel..."):
-            st.session_state["live_discrepancy_pdf"] = (build_key, [
-                reports.discrepancy_pdf(con, supplier, xref), reports.discrepancy_xlsx(con, supplier, xref)])
+        with st.spinner("Preparing discrepancy PDF and Excel…"):
+            cached = core.cache_get(con, artifact_key)
+            if cached is None:
+                cached = [reports.discrepancy_pdf(con, supplier, xref), reports.discrepancy_xlsx(con, supplier, xref)]
+                core.cache_set(con, artifact_key, "discrepancy-report-v2", cached, max_entries=12)
+            st.session_state["live_discrepancy_pdf"] = (build_key, cached)
     built = st.session_state.get("live_discrepancy_pdf")
     if built and built[0] == build_key:
         (pdf_name, pdf), (xlsx_name, xlsx) = built[1]

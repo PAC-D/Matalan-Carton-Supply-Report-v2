@@ -3,7 +3,7 @@ import streamlit as st
 
 import core
 import reports
-from web_ui import header, kpi_grid, page
+from web_ui import header, kpi_grid, page, search_frame, table_search
 
 REPORT_COLUMNS = [column for column in core.COLUMNS if column != "note"]
 
@@ -28,6 +28,10 @@ def rebate_frame(rows):
 def show_rebate_rows(frame, key):
     if frame.empty:
         st.info("No rows match this carton type and period.")
+        return
+    frame = search_frame(frame, table_search("Search rebate rows", f"{key}_search"))
+    if frame.empty:
+        st.info("No rebate rows match your search.")
         return
     st.dataframe(
         frame, hide_index=True, height=min(620, 38 + 35 * len(frame)),
@@ -103,12 +107,22 @@ def main():
 
     if not all_rows:
         return
-    build_key = (supplier, year, tuple(sorted(quarters)), so_only)
+    tracker_revision = max((row["imported_at"] or "" for row in all_rows), default="")
+    build_key = (supplier, year, tuple(sorted(quarters)), so_only, tracker_revision,
+                 len(all_rows), total_qty, round(total_amount, 2), round(pacd + rebate, 2))
+    artifact_key = core.cache_key("rebate-report-v2", build_key, core.data_revision(con))  # v2: [PDF, Excel]
+    if "live_rebate_pdf" not in st.session_state:
+        cached = core.cache_get(con, artifact_key)
+        if cached is not None:
+            st.session_state["live_rebate_pdf"] = (build_key, cached)
     if st.button("Prepare Rebate Report", icon=":material/description:"):
-        with st.spinner("Building PDF and Excel..."):
-            st.session_state["live_rebate_pdf"] = (build_key, [
-                reports.rebate_report_pdf(con, supplier, year, quarters, so_only=so_only),
-                reports.rebate_report_xlsx(con, supplier, year, quarters, so_only=so_only)])
+        with st.spinner("Preparing rebate PDF and Excel…"):
+            cached = core.cache_get(con, artifact_key)
+            if cached is None:
+                cached = [reports.rebate_report_pdf(con, supplier, year, quarters, so_only=so_only),
+                          reports.rebate_report_xlsx(con, supplier, year, quarters, so_only=so_only)]
+                core.cache_set(con, artifact_key, "rebate-report-v2", cached, max_entries=12)
+            st.session_state["live_rebate_pdf"] = (build_key, cached)
     built = st.session_state.get("live_rebate_pdf")
     if built and built[0] == build_key:
         (pdf_name, pdf), (xlsx_name, xlsx) = built[1]
