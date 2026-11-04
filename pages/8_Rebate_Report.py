@@ -70,12 +70,16 @@ def main():
             format_func=lambda quarter: core.quarter_label(year, quarter),
             key="rebate_quarters",
         )
+        so_only = st.radio(
+            "Rows", ["All tracker rows", "Rows with eBiz SO#"], horizontal=True, key="rebate_rows",
+            help="Rows with eBiz SO# leaves out rows whose eBiz Sales Order # is blank or 0.",
+        ) == "Rows with eBiz SO#"
     if not quarters:
         st.warning("Choose at least one quarter.")
         return
 
-    standard = core.rows(con, "STD", supplier=supplier, fiscal_year=year, quarters=quarters)
-    custom = core.rows(con, "CUS", supplier=supplier, fiscal_year=year, quarters=quarters)
+    standard, custom = ([row for row in core.rows(con, kind, supplier=supplier, fiscal_year=year, quarters=quarters)
+                         if not so_only or core._so(row["ebiz_so"])] for kind in ("STD", "CUS"))
     all_rows = standard + custom
     total_qty = sum(row["carton_qty"] or 0 for row in all_rows)
     total_amount = sum(row["total_amount"] or 0 for row in all_rows)
@@ -97,18 +101,22 @@ def main():
     with custom_tab:
         show_rebate_rows(rebate_frame(custom), "rebate_custom")
 
-    build_key = (supplier, year, tuple(sorted(quarters)))
-    if st.button("Prepare Rebate Report PDF", icon=":material/picture_as_pdf:"):
-        with st.spinner("Building PDF..."):
-            st.session_state["live_rebate_pdf"] = (
-                build_key, *reports.rebate_report_pdf(con, supplier, year, quarters))
+    if not all_rows:
+        return
+    build_key = (supplier, year, tuple(sorted(quarters)), so_only)
+    if st.button("Prepare Rebate Report", icon=":material/description:"):
+        with st.spinner("Building PDF and Excel..."):
+            st.session_state["live_rebate_pdf"] = (build_key, [
+                reports.rebate_report_pdf(con, supplier, year, quarters, so_only=so_only),
+                reports.rebate_report_xlsx(con, supplier, year, quarters, so_only=so_only)])
     built = st.session_state.get("live_rebate_pdf")
     if built and built[0] == build_key:
-        _, filename, data = built
-        st.download_button(
-            "Download Rebate Report PDF", data, file_name=filename,
-            mime="application/pdf", icon=":material/download:", key="rebate_pdf_download",
-        )
+        (pdf_name, pdf), (xlsx_name, xlsx) = built[1]
+        with st.container(horizontal=True):
+            st.download_button("Download Rebate Report PDF", pdf, file_name=pdf_name, mime="application/pdf",
+                               icon=":material/download:", key="rebate_pdf_download")
+            st.download_button("Download Rebate Report Excel", xlsx, file_name=xlsx_name,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", icon=":material/download:", key="rebate_xlsx_download")
 
 
 main()

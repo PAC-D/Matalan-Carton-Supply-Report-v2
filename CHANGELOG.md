@@ -18,6 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Rebate report has two types: all tracker rows, or only rows with an eBiz Sales Order # (blank and `0` left out). The second type's file name and title say "with SO#".
+- Every PDF report has an Excel twin with the same rows and totals: Rebate report and Discrepancy report on their pages, and Full Tracker (PacD/Matalan) and Discrepancy in the Build reports ZIP and Reports folder.
 - Storage moved from SQLite to PostgreSQL (psycopg 3). The connection comes from `DATABASE_URL`, which replaces `CARTON_DB`; production uses AWS RDS `database-1` over verified TLS.
 - The hosted URL prefix is now `/carton-supply-report/` (Streamlit base path, Docker health check, nginx template).
 - Pages no longer hold their database connection inside widget format functions, so open browser tabs do not keep connections open.

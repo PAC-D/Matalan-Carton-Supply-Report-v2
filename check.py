@@ -728,13 +728,17 @@ def test_full_tracker_pdf_without_rows_is_none(demo_con):
 SUMMARY = "Matalan Carton Shipment Tracking_Summary_Aug-Aug 26.xlsx"
 TW_FILES = [
     "Transworld Packaging (BD) Ltd/Full Tracker Sheet for PacD_Transworld Packaging (BD) Ltd_Q3_2026.pdf",
+    "Transworld Packaging (BD) Ltd/Full Tracker Sheet for PacD_Transworld Packaging (BD) Ltd_Q3_2026.xlsx",
     "Transworld Packaging (BD) Ltd/Full Tracker Sheet for Matalan_Transworld Packaging (BD) Ltd_Q3_2026.pdf",
+    "Transworld Packaging (BD) Ltd/Full Tracker Sheet for Matalan_Transworld Packaging (BD) Ltd_Q3_2026.xlsx",
     "Transworld Packaging (BD) Ltd/Tracker Raw Data_Transworld Packaging (BD) Ltd_Q3_2026.xlsx",
     "Transworld Packaging (BD) Ltd/Matalan Carton Shipment Tracking_NPS_BD Aug-26 to Aug-26 (Transworld).xlsx",
 ]
 UG_FILES = [
     "Uniglory Packaging Industries Ltd/Full Tracker Sheet for PacD_Uniglory Packaging Industries Ltd_Q3_2026.pdf",
+    "Uniglory Packaging Industries Ltd/Full Tracker Sheet for PacD_Uniglory Packaging Industries Ltd_Q3_2026.xlsx",
     "Uniglory Packaging Industries Ltd/Full Tracker Sheet for Matalan_Uniglory Packaging Industries Ltd_Q3_2026.pdf",
+    "Uniglory Packaging Industries Ltd/Full Tracker Sheet for Matalan_Uniglory Packaging Industries Ltd_Q3_2026.xlsx",
     "Uniglory Packaging Industries Ltd/Tracker Raw Data_Uniglory Packaging Industries Ltd_Q3_2026.xlsx",
     "Uniglory Packaging Industries Ltd/Matalan Carton Shipment Tracking_NPS_BD Aug-26 to Aug-26 (Uniglory).xlsx",
 ]
@@ -1000,10 +1004,82 @@ def test_rebate_report_pdf(demo_con):
     assert "PACD" in text and "Rebates" in text and "for Matalan" in text
 
 
+def xlsx_total(data, label, sheet=None):
+    """Carton QTY on the first row whose column A is `label`, in `sheet` (default: the first sheet)."""
+    wb = openpyxl.load_workbook(BytesIO(data))
+    rows = list((wb[sheet] if sheet else wb.worksheets[0]).iter_rows(values_only=True))
+    qty = next(r for r in rows if "Carton QTY" in r).index("Carton QTY")
+    return next(r[qty] for r in rows if r[0] == label)
+
+
+def test_rebate_report_with_so_only_drops_rows_without_an_ebiz_so(xref_con):
+    name, data = reports.rebate_report_xlsx(xref_con, "PACK", 2026, [3])
+    assert name == "Rebate Report_Pack A Ltd_Q3_2026.xlsx"
+    assert xlsx_total(data, "Tracker Grand Total") == 267  # SO#s 1001-1004, a blank SO# (5) and SO# "0" (2)
+    name, data = reports.rebate_report_xlsx(xref_con, "PACK", 2026, [3], so_only=True)
+    assert name == "Rebate Report (with SO#)_Pack A Ltd_Q3_2026.xlsx"
+    assert xlsx_total(data, "Tracker Grand Total") == 260
+    name, data = reports.rebate_report_pdf(xref_con, "PACK", 2026, [3], so_only=True)
+    assert name == "Rebate Report (with SO#)_Pack A Ltd_Q3_2026.pdf"
+    text = pdf_text(data)
+    assert "260" in text and "267" not in text
+    assert "Rebate Report with eBiz SO# (Pack A Ltd.)" in text  # a printed copy says which type it is
+
+
+def test_full_tracker_xlsx_matches_the_pdf(demo_con):
+    name, data = reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [3], "PacD")
+    assert name == "Full Tracker Sheet for PacD_Transworld Packaging (BD) Ltd_Q3_2026.xlsx"
+    qty = sum(r["carton_qty"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
+    assert xlsx_total(data, "Tracker Grand Total") == qty
+    assert xlsx_total(data, "Q3 2026 (Jul-Aug) Subtotal") == sum(
+        r["carton_qty"] for r in core.rows(demo_con, "STD", supplier=TW_KEY))
+    cells = [c for row in openpyxl.load_workbook(BytesIO(data)).active.iter_rows(values_only=True) for c in row]
+    assert "Full Tracker Report (Transworld Packaging (BD) Ltd.)" in cells
+    assert any(isinstance(c, date) for c in cells)  # dates are real Excel dates
+    _, matalan = reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [3], "Matalan")
+    header = next(r for r in openpyxl.load_workbook(BytesIO(matalan)).active.iter_rows(values_only=True)
+                  if "Carton QTY" in r)
+    assert not any("PACD" in str(h) for h in header)
+    assert reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [1], "PacD") is None
+
+
+def test_discrepancy_xlsx(xref_con):
+    name, data = reports.discrepancy_xlsx(xref_con, "PACK", core.cross_reference(xref_con, "PACK"))
+    assert name == f"Discrepancy Report_Pack A Ltd_{date.today():%d-%b-%Y}.xlsx"
+    wb = openpyxl.load_workbook(BytesIO(data))
+    assert wb.sheetnames == ["Not in eBiz", "Tracker > eBiz", "Tracker < eBiz", "No SO#", "eBiz not in Tracker"]
+    assert xlsx_total(data, "Total", "Not in eBiz") == 11  # SO# 1004: dated 10 + undated 1
+    assert xlsx_total(data, "Total", "No SO#") == 7
+    ebiz = list(wb["eBiz not in Tracker"].iter_rows(values_only=True))
+    assert any("8888|8889" in r for r in ebiz)
+    assert "eBiz QTY" in next(r for r in wb["Tracker > eBiz"].iter_rows(values_only=True) if "Carton QTY" in r)
+
+
+def test_rebate_page_switches_type_and_offers_pdf_and_excel(xref_con):
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(HERE / "pages" / "8_Rebate_Report.py"), default_timeout=60).run()
+    assert at.tabs[0].label == "Standard carton (6)"
+    at.radio(key="rebate_rows").set_value("Rows with eBiz SO#").run()
+    assert at.tabs[0].label == "Standard carton (4)"
+    next(b for b in at.button if b.label == "Prepare Rebate Report").click().run()
+    assert not at.exception
+    assert [d.label for d in at.get("download_button")] == ["Download Rebate Report PDF",
+                                                             "Download Rebate Report Excel"]
+
+
+def test_discrepancy_page_offers_pdf_and_excel(xref_con):
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(HERE / "pages" / "7_Discrepancy_Report.py"), default_timeout=60).run()
+    next(b for b in at.button if b.label == "Prepare Discrepancy Report").click().run()
+    assert not at.exception
+    assert [d.label for d in at.get("download_button")] == ["Download Discrepancy Report PDF",
+                                                             "Download Discrepancy Report Excel"]
+
+
 @pytest.mark.parametrize("page_name, expected_control", [
     ("6_Cross_Reference.py", "Download Cross Reference workbook"),
-    ("7_Discrepancy_Report.py", "Prepare Discrepancy Report PDF"),
-    ("8_Rebate_Report.py", "Prepare Rebate Report PDF"),
+    ("7_Discrepancy_Report.py", "Prepare Discrepancy Report"),
+    ("8_Rebate_Report.py", "Prepare Rebate Report"),
 ])
 def test_live_report_pages(xref_con, monkeypatch, page_name, expected_control):
     from streamlit.testing.v1 import AppTest
@@ -1160,7 +1236,8 @@ def test_build_all_adds_discrepancy_files_for_suppliers_with_ebiz(demo_con, tmp_
     core.replace_ebiz(demo_con, {"e.xlsx": core.read_ebiz(make_ebiz(tmp_path / "e.xlsx", [erow(so, vendor=TW)]))})
     folder = "Transworld Packaging (BD) Ltd"
     today = f"{date.today():%d-%b-%Y}"
-    disc = [f"{folder}/Discrepancy Report_{folder}_{today}.pdf", f"{folder}/Cross Reference_{folder}_{today}.xlsx"]
+    disc = [f"{folder}/Discrepancy Report_{folder}_{today}.pdf", f"{folder}/Discrepancy Report_{folder}_{today}.xlsx",
+            f"{folder}/Cross Reference_{folder}_{today}.xlsx"]
     items = reports.build_all(demo_con, [TW_KEY, UG_KEY], 2026, [3], discrepancy=True)
     assert [p for p, _ in items] == [SUMMARY] + TW_FILES + disc + UG_FILES  # Uniglory has no eBiz rows
     assert [p for p, _ in reports.build_all(demo_con, [TW_KEY, UG_KEY], 2026, [3])] == [SUMMARY] + TW_FILES + UG_FILES

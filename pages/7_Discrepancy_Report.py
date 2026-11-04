@@ -126,18 +126,18 @@ def main():
             st.info("No discrepancies found.")
 
     build_key = supplier
-    if st.button("Prepare Discrepancy Report PDF", icon=":material/picture_as_pdf:"):
-        with st.spinner("Building PDF..."):
-            st.session_state["live_discrepancy_pdf"] = (
-                build_key, *reports.discrepancy_pdf(con, supplier, xref))
+    if st.button("Prepare Discrepancy Report", icon=":material/description:"):
+        with st.spinner("Building PDF and Excel..."):
+            st.session_state["live_discrepancy_pdf"] = (build_key, [
+                reports.discrepancy_pdf(con, supplier, xref), reports.discrepancy_xlsx(con, supplier, xref)])
     built = st.session_state.get("live_discrepancy_pdf")
     if built and built[0] == build_key:
-        _, filename, data = built
-        st.download_button(
-            "Download Discrepancy Report PDF", data, file_name=filename,
-            mime="application/pdf", icon=":material/download:",
-            key="discrepancy_pdf_download",
-        )
+        (pdf_name, pdf), (xlsx_name, xlsx) = built[1]
+        with st.container(horizontal=True):
+            st.download_button("Download Discrepancy Report PDF", pdf, file_name=pdf_name, mime="application/pdf",
+                               icon=":material/download:", key="discrepancy_pdf_download")
+            st.download_button("Download Discrepancy Report Excel", xlsx, file_name=xlsx_name,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", icon=":material/download:", key="discrepancy_xlsx_download")
 
 
 main()

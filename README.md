@@ -16,8 +16,8 @@ for hosting.
 | Overview | **Dashboard** | Live Summary-report totals, quarterly supplier volumes, STD/CUS breakdown, and Tracker-to-eBiz reconciliation |
 | Reports | **Build reports** | Supplier/fiscal-period filters and ZIP or individual report downloads |
 | Reports | **Cross reference** | Live order-level Tracker/eBiz quantities, rebates, differences, match status, and eBiz-only orders |
-| Reports | **Discrepancy report** | Live versions of all five discrepancy sections with a matching PDF download |
-| Reports | **Rebate report** | Live Standard/Custom carton details, rebate totals, and a matching PDF download |
+| Reports | **Discrepancy report** | Live versions of all five discrepancy sections with matching PDF and Excel downloads |
+| Reports | **Rebate report** | Live Standard/Custom carton details and rebate totals, for all tracker rows or only rows with an eBiz SO#, with PDF and Excel downloads |
 | Manage | **Tracker data** | Edit imported `TRACK_STD` and `TRACK_CUS` rows, including dates, POs, quantities and prices |
 | Manage | **Rates** | Maintain date-effective PACD and Matalan rebate percentages |
 | Manage | **Data import** | Import tracker workbooks, review suspicious dates and replace eBiz vendor data |
@@ -39,7 +39,8 @@ appears in navigation and the Matalan wordmark appears in the top bar.
 - Maintains date-effective PACD and Matalan rebate rates.
 - Imports all current eBiz vendor exports as one atomic replacement.
 - Creates Summary, Full Tracker, Raw Data, Shipment Tracking, Discrepancy and
-  Cross Reference reports.
+  Cross Reference reports. Every PDF report also comes as an Excel workbook
+  with the same rows and totals.
 - Stores application data in PostgreSQL (`DATABASE_URL`). Tables and views are
   created and rates seeded on first connect.
 
@@ -147,9 +148,11 @@ a downloadable ZIP or save files under `Reports/<Month>/`.
 - Open **Cross reference** and select a packaging supplier to review every
   Tracker order against eBiz, including no-SO and eBiz-only totals.
 - Open **Discrepancy report** to review its five exception sections and prepare
-  the corresponding PDF.
-- Open **Rebate report** to filter by supplier, fiscal year and quarter, review
-  Standard and Custom calculations, and prepare the corresponding PDF.
+  the corresponding PDF and Excel files.
+- Open **Rebate report** to filter by supplier, fiscal year and quarter, choose
+  **All tracker rows** or **Rows with eBiz SO#** (leaves out rows whose eBiz
+  Sales Order # is blank or 0), review Standard and Custom calculations, and
+  prepare the corresponding PDF and Excel files.
 
 ## Database and backups
 

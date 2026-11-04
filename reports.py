@@ -116,16 +116,21 @@ def _write_table(ws, row, rows, cols):
         cell.font, cell.fill = HEAD_FONT, HEAD_FILL
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for r, values in enumerate(rows, row + 1):
-        for i, col in enumerate(cols, 1):
-            value = values[col]
-            if col in core.DATE_COLS and value:
-                value = date.fromisoformat(value)
-            elif col == "ebiz_so" and value and value.isdecimal():
-                value = int(value)
-            cell = ws.cell(r, i, value)
-            if col in XLSX_FORMATS:
-                cell.number_format = XLSX_FORMATS[col]
+        _xlsx_values(ws, r, 1, values, cols)
     return row + len(rows) + 1
+
+
+def _xlsx_values(ws, row, first, values, cols):
+    """values[col] for each of cols from column `first`, as Excel numbers and dates in the tracker formats."""
+    for i, col in enumerate(cols, first):
+        value = values[col]
+        if col in core.DATE_COLS and value:
+            value = date.fromisoformat(value)
+        elif col == "ebiz_so" and value and value.isdecimal():
+            value = int(value)
+        cell = ws.cell(row, i, value)
+        if col in XLSX_FORMATS:
+            cell.number_format = XLSX_FORMATS[col]
 
 
 def _add(values, more):
@@ -594,19 +599,34 @@ def _pdf(story, title):
     return buf.getvalue()
 
 
-def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filename,
-                 table_title="Full Tracker Table"):
+def _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename, so_only):
+    """(cols, [(carton type, rows)], title, file name without extension), or None when no row matches.
+
+    `so_only` keeps only the rows with an eBiz SO# (not blank and not "0").
+    """
     cols = TRACKER_COLS if brand == "PacD" else [c for c in TRACKER_COLS if c != "pacd"]
-    blocks = [(label, core.rows(con, kind, supplier=supplier, fiscal_year=fiscal_year, quarters=quarters))
+    blocks = [(label, [r for r in core.rows(con, kind, supplier=supplier, fiscal_year=fiscal_year,
+                                             quarters=quarters) if not so_only or core._so(r["ebiz_so"])])
               for kind, label in KINDS]
-    all_rows = [r for _, rows in blocks for r in rows]
-    if not all_rows:
+    if not any(rows for _, rows in blocks):
         return None
+    name = core.supplier_name(con, supplier)
+    qs = sorted(quarters)
+    span = f"Q{qs[0]}" if len(qs) == 1 else f"Q{qs[0]}-Q{qs[-1]}"
+    return (cols, blocks, f"{report_name} ({name})",
+            filename.format(brand=brand, name=safe_name(name), span=span, year=fiscal_year))
+
+
+def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filename,
+                 table_title="Full Tracker Table", so_only=False):
+    parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename, so_only)
+    if not parts:
+        return None
+    cols, blocks, title, base_name = parts
+    all_rows = [r for _, rows in blocks for r in rows]
     avail = PAGE[0] - 2 * MARGIN
     base = [BASE_WIDTHS["sr"]] + [BASE_WIDTHS[c] for c in cols]
     widths = [w * avail / sum(base) for w in base]
-    name = core.supplier_name(con, supplier)
-    title = f"{report_name} ({name})"
     story = [_title_bar(title, avail), Spacer(1, 6)]
     for label, rows in blocks:
         if rows:
@@ -617,23 +637,100 @@ def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filen
                            ("SPAN", (0, 0), (qty_i - 1, 0)), ("BACKGROUND", (0, 0), (-1, -1), NAVY),
                            ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
                            ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 6), ("ALIGN", (0, 0), (-1, -1), "RIGHT")])))
-    qs = sorted(quarters)
-    span = f"Q{qs[0]}" if len(qs) == 1 else f"Q{qs[0]}-Q{qs[-1]}"
-    return filename.format(brand=brand, name=safe_name(name), span=span, year=fiscal_year), _pdf(story, title)
+    return f"{base_name}.pdf", _pdf(story, title)
+
+
+def _xlsx_header(ws, row, headers):
+    for i, h in enumerate(headers, 1):
+        cell = ws.cell(row, i, h)
+        cell.font, cell.fill = HEAD_FONT, HEAD_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    return row + 1
+
+
+def _xlsx_total(ws, row, label, rows, cols, fill):
+    """A total line: label in column A, the summed figures under their columns (from B). Returns the next row."""
+    _cell(ws, row, 1, label, font=BODY_BOLD, fill=fill)
+    for i, col in enumerate(cols, 2):
+        cell = _cell(ws, row, i, None, font=BODY_BOLD, fill=fill)
+        if col in SUM_COLS:
+            cell.value = round(sum(r[col] or 0 for r in rows), 2)
+            cell.number_format = XLSX_FORMATS.get(col, "#,##0")
+    return row + 1
+
+
+def _xlsx_widths(ws, cols, extra=()):
+    width = dict(zip(RAW_COLS, RAW_WIDTHS))
+    _widths(ws, [8] + [width[c] for c in cols] + list(extra))
+
+
+def _xlsx_note(ws, row, text):
+    _cell(ws, row, 1, text, font=_font(italic=True, color=GREY_HEX))
+
+
+def _tracker_xlsx(con, supplier, fiscal_year, quarters, brand, report_name, filename,
+                  table_title="Full Tracker Table", so_only=False):
+    """The tracker PDF as one sheet: per carton type, quarter rows with subtotals, then the grand total."""
+    parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename, so_only)
+    if not parts:
+        return None
+    cols, blocks, title, base_name = parts
+    wb = Workbook()
+    ws = wb.active
+    ws.title = table_title[:31]
+    _cell(ws, 1, 1, title, font=HEADING)
+    row = 3
+    for label, rows in blocks:
+        if not rows:
+            continue
+        _banner(ws, row, f"{table_title} - {label} Carton", len(cols) + 1)
+        row = _xlsx_header(ws, row + 1, ["Sr No."] + _headers(rows, cols))
+        sr = 0
+        for (year, quarter), q_rows in groupby(rows, key=lambda r: (r["fiscal_year"], r["quarter"])):
+            q_rows = list(q_rows)
+            q_label = core.quarter_label(year, quarter)
+            _cell(ws, row, 1, f"{q_label} Quarter", font=HEADING)
+            row += 1
+            for r in q_rows:
+                sr += 1
+                ws.cell(row, 1, sr)
+                _xlsx_values(ws, row, 2, r, cols)
+                row += 1
+            row = _xlsx_total(ws, row, f"{q_label} Subtotal", q_rows, cols, SUBTOTAL_FILL)
+        row = _xlsx_total(ws, row, f"{label} Carton Total", rows, cols, GRAND_FILL) + 1
+    _xlsx_total(ws, row, "Tracker Grand Total", [r for _, rows in blocks for r in rows], cols, GRAND_FILL)
+    _xlsx_widths(ws, cols)
+    return f"{base_name}.xlsx", _bytes(wb)
+
+
+FULL_TRACKER = ("Full Tracker Report", "Full Tracker Sheet for {brand}_{name}_{span}_{year}")
 
 
 def full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
     """Full Tracker Sheet for PacD (brand "PacD") or for Matalan (brand "Matalan": no PACD column)."""
-    return _tracker_pdf(
-        con, supplier, fiscal_year, quarters, brand, "Full Tracker Report",
-        "Full Tracker Sheet for {brand}_{name}_{span}_{year}.pdf")
+    return _tracker_pdf(con, supplier, fiscal_year, quarters, brand, *FULL_TRACKER)
 
 
-def rebate_report_pdf(con, supplier, fiscal_year, quarters):
-    """Detailed tracker rebate report with both PACD and Matalan rebate columns."""
-    return _tracker_pdf(
-        con, supplier, fiscal_year, quarters, "PacD", "Rebate Report",
-        "Rebate Report_{name}_{span}_{year}.pdf", "Rebate Report")
+def full_tracker_xlsx(con, supplier, fiscal_year, quarters, brand):
+    """full_tracker_pdf() as an Excel workbook."""
+    return _tracker_xlsx(con, supplier, fiscal_year, quarters, brand, *FULL_TRACKER)
+
+
+def _rebate(so_only):
+    """(report name, file name, table title) of the Rebate Report; `so_only`: the rows-with-an-eBiz-SO# type."""
+    if so_only:
+        return "Rebate Report with eBiz SO#", "Rebate Report (with SO#)_{name}_{span}_{year}", "Rebate Report"
+    return "Rebate Report", "Rebate Report_{name}_{span}_{year}", "Rebate Report"
+
+
+def rebate_report_pdf(con, supplier, fiscal_year, quarters, so_only=False):
+    """Detailed tracker rebate report with PACD and Matalan rebate; `so_only`: only rows with an eBiz SO#."""
+    return _tracker_pdf(con, supplier, fiscal_year, quarters, "PacD", *_rebate(so_only), so_only=so_only)
+
+
+def rebate_report_xlsx(con, supplier, fiscal_year, quarters, so_only=False):
+    """rebate_report_pdf() as an Excel workbook."""
+    return _tracker_xlsx(con, supplier, fiscal_year, quarters, "PacD", *_rebate(so_only), so_only=so_only)
 
 
 YELLOW = colors.HexColor("#FFFF99")
@@ -706,6 +803,65 @@ def _no_discrepancies(avail):
     return Table([[Paragraph("No discrepancies found.", NOTE_STYLE)]], colWidths=[avail])
 
 
+DISCREPANCY_SHEETS = ["Not in eBiz", "Tracker > eBiz", "Tracker < eBiz", "No SO#"]  # one per DISCREPANCY_SECTIONS
+
+
+def _discrepancy_blocks(xref, orders, status):
+    """[(carton type, rows)], non-empty only, of the tracker rows whose order has `status` (None: no SO#)."""
+    blocks = []
+    for kind, label in KINDS:
+        rows = [r for r in xref["rows"][kind] if (orders[r["so"]]["status"] if r["so"] else None) == status]
+        if rows:
+            blocks.append((label, rows))
+    return blocks
+
+
+def discrepancy_xlsx(con, supplier, xref):
+    """discrepancy_pdf() as an Excel workbook, one sheet per section."""
+    name = core.supplier_name(con, supplier)
+    orders = {o["so"]: o for o in xref["orders"]}
+    wb = Workbook()
+    wb.remove(wb.active)
+    for sheet, (status, heading, _, with_ebiz) in zip(DISCREPANCY_SHEETS, DISCREPANCY_SECTIONS):
+        ws = wb.create_sheet(sheet)
+        _cell(ws, 1, 1, f"{heading} ({name})", font=HEADING)
+        row = 3
+        blocks = _discrepancy_blocks(xref, orders, status)
+        for label, rows in blocks:
+            _banner(ws, row, f"{label} Carton", len(TRACKER_COLS) + 1 + with_ebiz)
+            row = _xlsx_header(ws, row + 1, ["SL"] + _headers(rows, TRACKER_COLS) + ["eBiz QTY"] * with_ebiz)
+            for i, r in enumerate(rows, 1):
+                ws.cell(row, 1, i)
+                _xlsx_values(ws, row, 2, r, TRACKER_COLS)
+                if with_ebiz:
+                    ws.cell(row, len(TRACKER_COLS) + 2, orders[r["so"]]["ebiz_qty"]).number_format = "#,##0"
+                row += 1
+            row = _xlsx_total(ws, row, "Total", rows, TRACKER_COLS, GRAND_FILL) + 1
+        if not blocks:
+            _xlsx_note(ws, row, "No discrepancies found.")
+        _xlsx_widths(ws, TRACKER_COLS, [10] * with_ebiz)
+    ws = wb.create_sheet("eBiz not in Tracker")
+    _cell(ws, 1, 1, f"eBiz Orders Not Found in Tracker ({name})", font=HEADING)
+    ebiz = xref["ebiz_only"]
+    if ebiz:
+        row = _xlsx_header(ws, 3, ["SL"] + [core.EBIZ_HEADERS[c] for c in EBIZ_PDF_COLS])
+        for i, e in enumerate(ebiz, 1):
+            ws.cell(row, 1, i)
+            for j, col in enumerate(EBIZ_PDF_COLS, 2):
+                cell = ws.cell(row, j, e[col])
+                if col in core.EBIZ_REAL:
+                    cell.number_format = "#,##0" if col == "qty_shipped" else "#,##0.00"
+            row += 1
+        _cell(ws, row, 1, "Total", font=BODY_BOLD, fill=GRAND_FILL)
+        for col in ("qty_shipped", "total_rebate"):
+            _cell(ws, row, EBIZ_PDF_COLS.index(col) + 2, round(sum(e[col] or 0 for e in ebiz), 2), font=BODY_BOLD,
+                  fill=GRAND_FILL, fmt="#,##0" if col == "qty_shipped" else "#,##0.00")
+    else:
+        _xlsx_note(ws, 3, "No discrepancies found.")
+    _widths(ws, [6, 30, 12, 20, 20, 12, 14, 14, 14, 10])
+    return f"Discrepancy Report_{safe_name(name)}_{date.today():%d-%b-%Y}.xlsx", _bytes(wb)
+
+
 def discrepancy_pdf(con, supplier, xref):
     """Tracker rows that disagree with eBiz, then eBiz rows missing from the tracker, for one supplier.
 
@@ -723,10 +879,7 @@ def discrepancy_pdf(con, supplier, xref):
         base = [BASE_WIDTHS["sr"]] + [BASE_WIDTHS[c] for c in TRACKER_COLS] + [36] * extra  # 'eBiz QTY' fits
         widths = [w * avail / sum(base) for w in base]
         blocks = []
-        for kind, label in KINDS:
-            rows = [r for r in xref["rows"][kind] if (orders[r["so"]]["status"] if r["so"] else None) == status]
-            if not rows:
-                continue
+        for label, rows in _discrepancy_blocks(xref, orders, status):
             header = ["SL"] + _headers(rows, TRACKER_COLS) + ["eBiz QTY"] * extra
             lines = [[str(i)] + [_fmt(c, r[c]) for c in TRACKER_COLS]
                      + ([f"{orders[r['so']]['ebiz_qty']:,.0f}"] if extra else []) for i, r in enumerate(rows, 1)]
@@ -761,12 +914,14 @@ def build_all(con, suppliers, fiscal_year, quarters, discrepancy=False):
     for key in suppliers:
         files = []
         if core.date_range(con, supplier=key, fiscal_year=fiscal_year, quarters=quarters):
-            files += [full_tracker_pdf(con, key, fiscal_year, quarters, brand) for brand in ("PacD", "Matalan")]
+            files += [build(con, key, fiscal_year, quarters, brand) for brand in ("PacD", "Matalan")
+                      for build in (full_tracker_pdf, full_tracker_xlsx)]
             files += [raw_data_xlsx(con, key, fiscal_year, q) for q in sorted(quarters)]
             files.append(shipment_tracking_xlsx(con, key))
         if key in with_ebiz:
             xref = core.cross_reference(con, key)
-            files += [discrepancy_pdf(con, key, xref), cross_reference_xlsx(con, key, xref)]
+            files += [discrepancy_pdf(con, key, xref), discrepancy_xlsx(con, key, xref),
+                      cross_reference_xlsx(con, key, xref)]
         folder = safe_name(core.supplier_name(con, key))
         items += [(f"{folder}/{name}", data) for name, data in filter(None, files)]
     return [item for item in items if item]
