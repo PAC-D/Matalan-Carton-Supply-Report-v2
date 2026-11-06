@@ -49,7 +49,7 @@ appears in navigation and the Matalan wordmark appears in the top bar.
 - Python 3.14+
 - Packages in `requirements.txt`
 - PostgreSQL 16+ (local development uses `postgres:18` in Docker Desktop)
-- Windows 10/11 for `run.bat`; Linux is supported through the manual or Docker
+- Windows 10/11 for `run.bat`; Linux can use `run.sh` or the manual/Docker
   commands
 
 ## Run locally
@@ -67,6 +67,13 @@ After a reboot, `docker start carton-pg` brings it back with its data.
 Double-click `run.bat`. On the first run it creates `.venv`, installs the
 requirements and opens the website at <http://localhost:8501>. Unless
 `DATABASE_URL` is already set, it uses the local `carton-pg` database.
+
+### Linux one-click
+
+Start PostgreSQL using the Docker command above, then run `./run.sh`. On the
+first run it creates `.venv`, installs the requirements and starts the website
+at <http://localhost:8501>. Unless `DATABASE_URL` is already set, it uses the
+local `carton-pg` database.
 
 ### Manual setup
 
