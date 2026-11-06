@@ -199,6 +199,11 @@ def kpi_grid(tiles: list[dict]) -> None:
             + "".join(cards) + "</div>")
 
 
+def _select_kpi(state_key: str, tile_id: str) -> None:
+    """Apply a card selection before Streamlit renders the next script run."""
+    st.session_state[state_key] = tile_id
+
+
 def interactive_kpi_grid(tiles: list[dict], key: str, default: str = "all") -> str:
     """Render KPI cards as real buttons and return the active tile id."""
     state_key = f"{key}_active"
@@ -211,10 +216,15 @@ def interactive_kpi_grid(tiles: list[dict], key: str, default: str = "all") -> s
         label = f"{tile['label']}\n{tile['value']}"
         if tile.get("note"):
             label += f"\n{tile['note']}"
-        if column.button(label, key=f"kpi_card_{key}_{tile_id}", use_container_width=True,
-                         type="primary" if st.session_state[state_key] == tile_id else "secondary",
-                         help=tile.get("help")):
-            st.session_state[state_key] = tile_id
+        column.button(
+            label,
+            key=f"kpi_card_{key}_{tile_id}",
+            use_container_width=True,
+            type="primary" if st.session_state[state_key] == tile_id else "secondary",
+            help=tile.get("help"),
+            on_click=_select_kpi,
+            args=(state_key, tile_id),
+        )
     return st.session_state[state_key]
 
 

@@ -779,13 +779,19 @@ def test_app_smoke(tmp_path, monkeypatch):
     at = AppTest.from_file(str(HERE / "pages" / "1_Dashboard.py"), default_timeout=30).run()
     assert not at.exception
     assert [item.value for item in at.subheader] == [
-        "Quarterly carton sales by packaging supplier",
+        "Quarterly total carton sales by packaging supplier",
         "Standard and custom cartons",
         "Live Summary sheet",
         "Tracker and eBiz cross-reference",
     ]
     assert at.selectbox[0].label == "Fiscal year"
     assert at.multiselect[0].label == "Packaging suppliers"
+
+    next(button for button in at.button if button.label.startswith("Standard cartons")).click().run()
+    assert at.session_state["dashboard_summary_active"] == "Standard"
+    assert next(button for button in at.button
+                if button.label.startswith("Standard cartons")).proto.type == "primary"
+    assert at.subheader[0].value == "Quarterly standard carton sales by packaging supplier"
 
 
 def test_app_builds_reports_for_every_selected_supplier(tmp_path, monkeypatch):
@@ -1089,6 +1095,13 @@ def test_live_report_pages(xref_con, monkeypatch, page_name, expected_control):
     controls = [button.label for button in at.button]
     controls += [button.label for button in at.get("download_button")]
     assert expected_control in controls
+    if page_name == "7_Discrepancy_Report.py":
+        next(button for button in at.button
+             if button.label.startswith("Tracker > eBiz")).click().run()
+        assert at.session_state["discrepancy_active"] == "greater"
+        assert next(button for button in at.button
+                    if button.label.startswith("Tracker > eBiz")).proto.type == "primary"
+        assert at.subheader[0].value == "Tracker quantity is greater"
 
 
 def test_docker_image_never_contains_the_env_file():

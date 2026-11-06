@@ -189,9 +189,16 @@ def live_summary():
          "note": "Included in this view"},
     ], "dashboard_summary")
     shown_data = data[data["carton_type"] == active].copy() if active in {"Standard", "Custom"} else data
+    supplier_label = "packaging supplier" if len(selected) == 1 else "packaging suppliers"
+    quarterly_title = {
+        "all": "Quarterly total carton sales by packaging supplier",
+        "Standard": "Quarterly standard carton sales by packaging supplier",
+        "Custom": "Quarterly custom carton sales by packaging supplier",
+        "suppliers": f"Quarterly carton sales across {len(selected):,} {supplier_label}",
+    }[active]
 
     with st.container(border=True, key="card_quarterly_suppliers"):
-        st.subheader("Quarterly carton sales by packaging supplier")
+        st.subheader(quarterly_title)
         st.altair_chart(
             stacked_chart(shown_data, "packaging_supplier", PALETTE, "Packaging supplier"),
             key="quarterly_supplier_chart",
