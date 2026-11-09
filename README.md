@@ -18,7 +18,8 @@ for hosting.
 | Reports | **Cross reference** | Live order-level Tracker/eBiz quantities, rebates, differences, match status, and eBiz-only orders |
 | Reports | **Discrepancy report** | Live versions of all five discrepancy sections with matching PDF and Excel downloads |
 | Reports | **Rebate report** | Live Standard/Custom carton details and rebate totals, for all tracker rows or only rows with an eBiz SO#, with PDF and Excel downloads |
-| Manage | **Tracker data** | Edit imported `TRACK_STD` and `TRACK_CUS` rows, including dates, POs, quantities and prices |
+| Manage | **Tracker data** | Edit imported `TRACK_STD` and `TRACK_CUS` rows, and delete selected rows, a supplier's month, or everything from one imported file |
+| Manage | **eBiz data** | View, edit and delete imported eBiz vendor rows; SO_1/SO_2 and the vendor key are recalculated on save |
 | Manage | **Rates** | Maintain date-effective PACD and Matalan rebate percentages |
 | Manage | **Data import** | Import tracker workbooks, review suspicious dates and replace eBiz vendor data |
 
@@ -136,8 +137,26 @@ quarter-based reports.
 3. Edit cells directly in the table.
 4. Select **Save tracker changes**.
 
-Row IDs and source metadata are read-only. Rate, rebate, PACD, fiscal year and
-quarter are calculated fields and update automatically after edits.
+Row IDs and source metadata are read-only. Rate, rebate, PACD Rebate, fiscal
+year and quarter are calculated fields and update automatically after edits.
+
+To remove data, open **Delete tracker data** under the table and pick
+**Selected rows** (tick the Delete column), **Supplier and month** (both sheets;
+rows without a shipment date are kept) or **Imported file**. Every delete shows
+what will go and asks to confirm. Deletes are permanent; RDS keeps 7 days of
+backups.
+
+### Quarters
+
+Q1 2026 runs from December 2025 to March 2026. Every later quarter is a calendar
+quarter: Q2 Apr–Jun, Q3 Jul–Sep, Q4 Oct–Dec, then Q1 2027 Jan–Mar. Fiscal year
+and quarter are calculated from the shipment date, so stored rows follow the
+rule without re-importing.
+
+### Correct eBiz rows
+
+Open **eBiz data**, filter by vendor, edit cells and select **Save eBiz
+changes**. To delete rows, tick the Delete column and confirm.
 
 ### Import eBiz data
 

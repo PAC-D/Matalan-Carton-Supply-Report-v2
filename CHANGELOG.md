@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- eBiz data page (Manage) to view, edit and delete eBiz rows; SO_1/SO_2 and the vendor key are recalculated on save.
+- Tracker data deletes: selected rows, a supplier's shipment month (both sheets) or every row from one imported file, each with a confirmation step.
+- PDF reports redesigned as statements: small logos, a shipping-mark box with supplier, period and row type, equal-weight totals, quiet tables, dates as `01 Aug 2026`, and "Sheet x of y". L and W are left out of PDFs only. Excel twins carry the same statement header.
+
+### Changed
+
+- Quarters: Q1 2026 is Dec 2025 – Mar 2026; later quarters are calendar quarters (Q4 2026 = Oct–Dec, Q1 2027 = Jan–Mar).
+- Labels: PACD → PACD Rebate, Rebate rate → Matalan Rate; report headers read "PACD Rebate (4%)" and "Matalan Rebate (5%)".
+- The browser tab shows "Matalan Carton Supply Report" while the app loads instead of "Streamlit".
+
 - Responsive multipage website with grouped navigation for Dashboard, report building/live views, Tracker data, Rates, and Data import.
 - Branded PACD/Matalan page shell using the existing left and right logo assets.
 - Dashboard with live Summary-report KPIs, quarterly packaging-supplier volumes, Standard/Custom breakdown and Tracker-to-eBiz reconciliation.
