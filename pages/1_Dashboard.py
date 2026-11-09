@@ -10,7 +10,8 @@ TYPE_COLORS = ["#2869B1", "#00AEEF"]
 
 
 def stacked_chart(data, color, colors, tooltip_title):
-    order = [f"Q{quarter} ({core.QUARTER_MONTHS[quarter]})"
+    year = int(data["fiscal_year"].iloc[0])
+    order = [f"Q{quarter} ({core.quarter_months(year, quarter)})"
              for quarter in sorted(data["quarter"].unique())]
     return (
         alt.Chart(data)

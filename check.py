@@ -72,9 +72,9 @@ def test_shared_chrome_reserves_header_space_and_renders_floating_chip(monkeypat
 def test_quarter_mapping(tmp_path):
     con = core.connect()
     cases = {
-        "2025-12-01": (2026, 1), "2026-03-31": (2026, 1), "2026-04-01": (2026, 2),
-        "2026-08-31": (2026, 3), "2026-09-01": (2026, 4), "2026-11-30": (2026, 4),
-        "2026-12-01": (2027, 1),
+        "2025-11-30": (2025, 4), "2025-12-01": (2026, 1), "2026-03-31": (2026, 1), "2026-04-01": (2026, 2),
+        "2026-08-31": (2026, 3), "2026-09-30": (2026, 3), "2026-10-01": (2026, 4), "2026-12-31": (2026, 4),
+        "2027-01-01": (2027, 1),
     }
     for d in cases:
         insert(con, "STD", shipment_date=d, carton_qty=1, unit_price=1.0, total_amount=1.0)
@@ -132,6 +132,19 @@ def test_connect_without_url_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("DATABASE_URL")
     with pytest.raises(RuntimeError, match="DATABASE_URL is not set"):
         core.connect()
+
+
+def test_quarter_labels_follow_the_year():
+    assert core.quarter_label(2026, 1) == "Q1 2026 (Dec-Mar)"
+    assert core.quarter_label(2026, 3) == "Q3 2026 (Jul-Sep)"
+    assert core.quarter_label(2026, 4) == "Q4 2026 (Oct-Dec)"
+    assert core.quarter_label(2027, 1) == "Q1 2027 (Jan-Mar)"
+
+
+def test_cache_keys_change_with_the_cache_version(monkeypatch):
+    before = core.cache_key("x", 1)
+    monkeypatch.setattr(core, "CACHE_VERSION", core.CACHE_VERSION + 1)
+    assert core.cache_key("x", 1) != before
 
 
 def test_connect_is_repeatable_and_seeds_once(tmp_path):
@@ -600,7 +613,7 @@ def test_live_summary_rows_match_report_totals(tmp_path):
     rows = core.summary_rows(con, 2026)
     assert [(row["carton_type"], row["cartons"], row["total_amount"])
             for row in rows] == [("Standard", 10, 20.0), ("Custom", 5, 20.0)]
-    assert all(row["quarter_label"] == "Q3 (Jul-Aug)" for row in rows)
+    assert all(row["quarter_label"] == "Q3 (Jul-Sep)" for row in rows)
     assert rows[0]["pacd_rate"] == 0.04 and rows[1]["pacd_rate"] == 0.075
     assert core.summary_rows(con, 2027) == []
 
@@ -643,7 +656,7 @@ def test_summary_xlsx(demo_con):
     assert rows[head + 1] == ["Quarter", "Carton Type", "PACD Rate", "Rebate Rate", "Carton QTY", "Total Amount",
                               "PACD", "Matalan Rebate"]
     std, cus, total = rows[head + 2:head + 5]
-    assert std[:4] == ["Q3 (Jul-Aug)", "Standard", 0.04, 0.05]
+    assert std[:4] == ["Q3 (Jul-Sep)", "Standard", 0.04, 0.05]
     assert cus[:4] == [None, "Custom", 0.075, 0.05]  # quarter cell merged over both lines
     assert total[0] == "Q3 Total"
     assert total[5] == pytest.approx(std[5] + cus[5], abs=1e-9)  # Total adds the rounded values
@@ -706,7 +719,7 @@ def test_full_tracker_pdf_pacd(demo_con):
     text = pdf_text(data)
     total = sum(r["total_amount"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
     for expected in ("Full Tracker Report (Transworld Packaging (BD) Ltd.)", "Standard Carton",
-                     "Q3 2026 (Jul-Aug) Quarter", "Q3 2026 (Jul-Aug) Subtotal", "Standard Carton Total",
+                     "Q3 2026 (Jul-Sep) Quarter", "Q3 2026 (Jul-Sep) Subtotal", "Standard Carton Total",
                      "Custom Carton Total", "Tracker Grand Total", f"{total:,.2f}", "PACD",
                      "Page 1 of", "Generated:"):
         assert expected in text, expected
@@ -1037,7 +1050,7 @@ def test_full_tracker_xlsx_matches_the_pdf(demo_con):
     assert name == "Full Tracker Sheet for PacD_Transworld Packaging (BD) Ltd_Q3_2026.xlsx"
     qty = sum(r["carton_qty"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
     assert xlsx_total(data, "Tracker Grand Total") == qty
-    assert xlsx_total(data, "Q3 2026 (Jul-Aug) Subtotal") == sum(
+    assert xlsx_total(data, "Q3 2026 (Jul-Sep) Subtotal") == sum(
         r["carton_qty"] for r in core.rows(demo_con, "STD", supplier=TW_KEY))
     cells = [c for row in openpyxl.load_workbook(BytesIO(data)).active.iter_rows(values_only=True) for c in row]
     assert "Full Tracker Report (Transworld Packaging (BD) Ltd.)" in cells

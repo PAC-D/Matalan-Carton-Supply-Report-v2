@@ -78,13 +78,11 @@ SELECT t.*, r.pacd_pct, r.matalan_pct,
   t.unit_price * t.carton_qty * r.matalan_pct AS matalan_rebate,
   (t.total_amount - t.unit_price * t.carton_qty * r.matalan_pct) * r.pacd_pct AS pacd,
   EXTRACT(YEAR FROM t.shipment_date::date)::int
-    + (EXTRACT(MONTH FROM t.shipment_date::date) = 12)::int AS fiscal_year,
+    + (date_trunc('month', t.shipment_date::date) = DATE '2025-12-01')::int AS fiscal_year,
   CASE
     WHEN t.shipment_date IS NULL THEN NULL
-    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int IN (12, 1, 2, 3) THEN 1
-    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int BETWEEN 4 AND 6 THEN 2
-    WHEN EXTRACT(MONTH FROM t.shipment_date::date)::int IN (7, 8) THEN 3
-    ELSE 4
+    WHEN date_trunc('month', t.shipment_date::date) = DATE '2025-12-01' THEN 1
+    ELSE (EXTRACT(MONTH FROM t.shipment_date::date)::int + 2) / 3
   END AS quarter
 FROM {table} t
 LEFT JOIN rates r ON r.carton_type = '{kind}' AND r.effective_from = (
@@ -183,9 +181,12 @@ def connect(url=None):
     return con
 
 
+CACHE_VERSION = 2  # bump when report content changes for the same data (2: calendar quarters)
+
+
 def cache_key(namespace, *parts):
     """Stable key for an application-owned persistent cache entry."""
-    digest = hashlib.sha256(namespace.encode())
+    digest = hashlib.sha256(f"{CACHE_VERSION}:{namespace}".encode())
     for part in parts:
         raw = (bytes(part) if isinstance(part, (bytes, bytearray, memoryview)) else
                json.dumps(part, sort_keys=True, default=str,
@@ -846,11 +847,16 @@ def save_rates(con, rates):
         _bump_revision(con)
 
 
-QUARTER_MONTHS = {1: "Dec-Mar", 2: "Apr-Jun", 3: "Jul-Aug", 4: "Sep-Nov"}
+CALENDAR_QUARTERS = {1: "Jan-Mar", 2: "Apr-Jun", 3: "Jul-Sep", 4: "Oct-Dec"}
+
+
+def quarter_months(fiscal_year, quarter):
+    """Months of a fiscal quarter: calendar quarters, except Q1 2026, which starts in December 2025."""
+    return "Dec-Mar" if (int(fiscal_year), int(quarter)) == (2026, 1) else CALENDAR_QUARTERS[int(quarter)]
 
 
 def quarter_label(fiscal_year, quarter):
-    return f"Q{quarter} {fiscal_year} ({QUARTER_MONTHS[quarter]})"
+    return f"Q{quarter} {fiscal_year} ({quarter_months(fiscal_year, quarter)})"
 
 
 def _where(supplier=None, suppliers=None, fiscal_year=None, quarters=None):
@@ -1030,7 +1036,7 @@ def summary_rows(con, fiscal_year, supplier=None):
                     "packaging_supplier": supplier_name(con, key),
                     "fiscal_year": int(fiscal_year),
                     "quarter": quarter,
-                    "quarter_label": f"Q{quarter} ({QUARTER_MONTHS[quarter]})",
+                    "quarter_label": f"Q{quarter} ({quarter_months(fiscal_year, quarter)})",
                     "carton_type": label,
                     "pacd_rate": pacd_rate,
                     "rebate_rate": rebate_rate,

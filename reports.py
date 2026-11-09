@@ -310,7 +310,7 @@ def summary_xlsx(con, fiscal_year):
             top = rows.next
             for label, pcts, values in kinds:
                 row = rows.add(16)
-                _cell(ws, row, 1, f"Q{q} ({core.QUARTER_MONTHS[q]})" if row == top else None, align=LEFT,
+                _cell(ws, row, 1, f"Q{q} ({core.quarter_months(fiscal_year, q)})" if row == top else None, align=LEFT,
                       border=ROW_LINE)
                 _cell(ws, row, 2, label, align=LEFT, border=ROW_LINE)
                 for col, pct in zip((3, 4), pcts):
@@ -324,8 +324,8 @@ def summary_xlsx(con, fiscal_year):
         _span(ws, row, 1, 4, "Grand Total", font=BODY_BOLD, align=LEFT, fill=GRAND_FILL, border=GRAND_LINE)
         _figures(ws, row, grand, BODY_BOLD, GRAND_FILL, GRAND_LINE)
 
-    quarters = ", ".join(f"Q{q} {months}" for q, months in core.QUARTER_MONTHS.items())
-    notes = [f"Quarters: {quarters}. December counts toward the next fiscal year.",
+    quarters = ", ".join(f"Q{q} {core.quarter_months(fiscal_year, q)}" for q in range(1, 5))
+    notes = [f"Quarters: {quarters}. Q1 2026 starts in December 2025; later quarters are calendar quarters.",
              "Rates apply by shipment date. Matalan Rebate = Unit Price × Carton QTY × Rebate Rate; "
              "PACD = (Total Amount − Matalan Rebate) × PACD Rate."]
     rows.keep_together(12 + 16 + 14 + 26)
