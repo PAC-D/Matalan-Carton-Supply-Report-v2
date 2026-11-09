@@ -15,12 +15,12 @@ def rebate_frame(rows):
     shown = REPORT_COLUMNS + ["pacd_pct", "matalan_pct", "pacd", "matalan_rebate"]
     frame = frame[shown].rename(columns={
         **core.HEADERS,
-        "pacd_pct": "PACD rate",
-        "matalan_pct": "Rebate rate",
-        "pacd": "PACD",
+        "pacd_pct": "PACD Rate",
+        "matalan_pct": "Matalan Rate",
+        "pacd": "PACD Rebate",
         "matalan_rebate": "Matalan rebate",
     })
-    rates = ["PACD rate", "Rebate rate"]
+    rates = ["PACD Rate", "Matalan Rate"]
     frame[rates] = frame[rates].map(lambda value: f"{value * 100:g}%" if pd.notna(value) else "-")
     return frame
 
@@ -39,7 +39,7 @@ def show_rebate_rows(frame, key):
             "Shipment Date": st.column_config.TextColumn(pinned=True),
             "Carton QTY": st.column_config.NumberColumn(format="localized"),
             "Total Amount": st.column_config.NumberColumn(format="$ %.2f"),
-            "PACD": st.column_config.NumberColumn(format="$ %.2f"),
+            "PACD Rebate": st.column_config.NumberColumn(format="$ %.2f"),
             "Matalan rebate": st.column_config.NumberColumn(format="$ %.2f"),
         },
         key=key,
@@ -93,7 +93,7 @@ def main():
         {"label": "Tracker rows", "value": f"{len(all_rows):,}"},
         {"label": "Carton quantity", "value": f"{total_qty:,.0f}"},
         {"label": "Total amount", "value": f"$ {total_amount:,.2f}"},
-        {"label": "PACD", "value": f"$ {pacd:,.2f}"},
+        {"label": "PACD Rebate", "value": f"$ {pacd:,.2f}"},
         {"label": "Matalan rebate", "value": f"$ {rebate:,.2f}"},
     ])
 

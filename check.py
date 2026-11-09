@@ -622,10 +622,16 @@ def test_rate_headers():
     one = [{"pacd_pct": 0.075, "matalan_pct": 0.05}] * 2
     mixed = [{"pacd_pct": 0.075, "matalan_pct": 0.05}, {"pacd_pct": 0.075, "matalan_pct": 0.10}]
     unrated = [{"pacd_pct": 0.04, "matalan_pct": 0.05}, {"pacd_pct": None, "matalan_pct": None}]
-    assert core.rate_headers(one) == ("7.5% for PACD", "5% Rebates for Matalan")
-    assert core.rate_headers(mixed) == ("7.5% for PACD", "Rebates for Matalan")
-    assert core.rate_headers(unrated) == ("PACD", "Rebates for Matalan")
-    assert core.rate_headers([]) == ("PACD", "Rebates for Matalan")
+    assert core.rate_headers(one) == ("PACD Rebate (7.5%)", "Matalan Rebate (5%)")
+    assert core.rate_headers(mixed) == ("PACD Rebate (7.5%)", "Matalan Rebate")
+    assert core.rate_headers(unrated) == ("PACD Rebate", "Matalan Rebate")
+    assert core.rate_headers([]) == ("PACD Rebate", "Matalan Rebate")
+
+
+def test_pages_use_the_new_rebate_labels():
+    for path in (HERE / "pages").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert '"Rebate rate"' not in text and '"PACD"' not in text, path.name
 
 
 def test_safe_name():
@@ -653,8 +659,8 @@ def test_summary_xlsx(demo_con):
     assert overview[2][7] == pytest.approx(1682.3458 + 1890.7828, abs=0.05)
 
     head = next(i for i, r in enumerate(rows) if r[0] == TW and r[4] is None)
-    assert rows[head + 1] == ["Quarter", "Carton Type", "PACD Rate", "Rebate Rate", "Carton QTY", "Total Amount",
-                              "PACD", "Matalan Rebate"]
+    assert rows[head + 1] == ["Quarter", "Carton Type", "PACD Rate", "Matalan Rate", "Carton QTY", "Total Amount",
+                              "PACD Rebate", "Matalan Rebate"]
     std, cus, total = rows[head + 2:head + 5]
     assert std[:4] == ["Q3 (Jul-Sep)", "Standard", 0.04, 0.05]
     assert cus[:4] == [None, "Custom", 0.075, 0.05]  # quarter cell merged over both lines
@@ -690,9 +696,9 @@ def test_raw_data_xlsx(demo_con):
     ws = openpyxl.load_workbook(BytesIO(data)).active
     assert ws.title == "Q3 2026"
     assert ws["A1"].value == "Standard Carton"
-    assert [c.value for c in ws[2]][21:24] == ["4% for PACD", "5% Rebates for Matalan", "NOTE"]
+    assert [c.value for c in ws[2]][21:24] == ["PACD Rebate (4%)", "Matalan Rebate (5%)", "NOTE"]
     assert ws["A59"].value == "Custom Carton"  # 55 STD rows on 3-57, blank row 58
-    assert [c.value for c in ws[60]][21:23] == ["7.5% for PACD", "5% Rebates for Matalan"]
+    assert [c.value for c in ws[60]][21:23] == ["PACD Rebate (7.5%)", "Matalan Rebate (5%)"]
     assert ws.max_row == 151  # 91 CUS rows on 61-151
     assert isinstance(ws["B3"].value, datetime)
     assert isinstance(ws["H3"].value, int)  # eBiz Sales Order #
@@ -710,7 +716,8 @@ def test_shipment_tracking_xlsx(demo_con):
 
 
 def pdf_text(data):
-    return "\n".join(p.extract_text() for p in pypdf.PdfReader(BytesIO(data)).pages)
+    """All pages as one line of words: line breaks inside wrapped table headers are layout, not content."""
+    return " ".join(" ".join(p.extract_text() for p in pypdf.PdfReader(BytesIO(data)).pages).split())
 
 
 def test_full_tracker_pdf_pacd(demo_con):
@@ -720,7 +727,7 @@ def test_full_tracker_pdf_pacd(demo_con):
     total = sum(r["total_amount"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
     for expected in ("Full Tracker Report (Transworld Packaging (BD) Ltd.)", "Standard Carton",
                      "Q3 2026 (Jul-Sep) Quarter", "Q3 2026 (Jul-Sep) Subtotal", "Standard Carton Total",
-                     "Custom Carton Total", "Tracker Grand Total", f"{total:,.2f}", "PACD",
+                     "Custom Carton Total", "Tracker Grand Total", f"{total:,.2f}", "PACD Rebate",
                      "Page 1 of", "Generated:"):
         assert expected in text, expected
     assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2  # both logos
@@ -731,7 +738,7 @@ def test_full_tracker_pdf_matalan_has_no_pacd(demo_con):
     assert name == "Full Tracker Sheet for Matalan_Uniglory Packaging Industries Ltd_Q1-Q3_2026.pdf"
     text = pdf_text(data)
     assert "PACD" not in text
-    assert "Rebates" in text and "Tracker Grand Total" in text
+    assert "Matalan Rebate" in text and "Tracker Grand Total" in text
 
 
 def test_full_tracker_pdf_without_rows_is_none(demo_con):
@@ -1020,7 +1027,7 @@ def test_rebate_report_pdf(demo_con):
     text = pdf_text(data)
     assert "Rebate Report (Transworld Packaging (BD) Ltd.)" in text
     assert "Standard Carton" in text and "Custom Carton" in text
-    assert "PACD" in text and "Rebates" in text and "for Matalan" in text
+    assert "PACD Rebate" in text and "Matalan Rebate" in text
 
 
 def xlsx_total(data, label, sheet=None):

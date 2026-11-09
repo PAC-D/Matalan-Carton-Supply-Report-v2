@@ -20,7 +20,7 @@ def tracker_frame(rows, carton_type, orders, include_ebiz=False):
     if frame.empty:
         return frame
     labels = {"carton_type": "Carton type", **core.HEADERS,
-              "pacd": "PACD", "matalan_rebate": "Matalan rebate", "ebiz_qty": "eBiz QTY",
+              "pacd": "PACD Rebate", "matalan_rebate": "Matalan rebate", "ebiz_qty": "eBiz QTY",
               "via_so2": "Matched via SO_2"}
     return frame.rename(columns=labels)
 
@@ -40,7 +40,7 @@ def show_tracker_rows(frame, key):
             "Carton QTY": st.column_config.NumberColumn(format="localized"),
             "eBiz QTY": st.column_config.NumberColumn(format="localized"),
             "Total Amount": st.column_config.NumberColumn(format="$ %.2f"),
-            "PACD": st.column_config.NumberColumn(format="$ %.2f"),
+            "PACD Rebate": st.column_config.NumberColumn(format="$ %.2f"),
             "Matalan rebate": st.column_config.NumberColumn(format="$ %.2f"),
             "Matched via SO_2": st.column_config.CheckboxColumn(),
         },

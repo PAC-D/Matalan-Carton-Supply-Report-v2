@@ -1154,7 +1154,7 @@ def quarter_rates(con, kind, supplier, fiscal_year):
 
 def rate_headers(rows):
     """Headers for the PACD and rebate columns; they show the % when every row has the same rate."""
-    def label(key, after_pct, plain):
+    def label(key, name):
         pcts = {r[key] for r in rows}
-        return f"{round(pcts.pop() * 100, 4):g}% {after_pct}" if len(pcts) == 1 and None not in pcts else plain
-    return label("pacd_pct", "for PACD", "PACD"), label("matalan_pct", "Rebates for Matalan", "Rebates for Matalan")
+        return f"{name} ({round(pcts.pop() * 100, 4):g}%)" if len(pcts) == 1 and None not in pcts else name
+    return label("pacd_pct", "PACD Rebate"), label("matalan_pct", "Matalan Rebate")

@@ -48,7 +48,7 @@ BANNER_FILL = PatternFill("solid", fgColor="4472C4")
 
 SUMMARY_PREFIX = "Matalan Carton Shipment Tracking_Summary_"
 SUMMARY_TITLE = "Carton Shipment Summary"
-SUMMARY_HEADERS = ["Quarter", "Carton Type", "PACD Rate", "Rebate Rate", "Carton QTY", "Total Amount", "PACD",
+SUMMARY_HEADERS = ["Quarter", "Carton Type", "PACD Rate", "Matalan Rate", "Carton QTY", "Total Amount", "PACD Rebate",
                    "Matalan Rebate"]
 SUMMARY_WIDTHS = [13, 13, 10, 10, 12, 15, 13, 16]
 SUMMARY_MARGINS = {"left": 0.4, "right": 0.4, "top": 0.5, "bottom": 0.6, "header": 0.3, "footer": 0.3}  # inches
@@ -326,8 +326,8 @@ def summary_xlsx(con, fiscal_year):
 
     quarters = ", ".join(f"Q{q} {core.quarter_months(fiscal_year, q)}" for q in range(1, 5))
     notes = [f"Quarters: {quarters}. Q1 2026 starts in December 2025; later quarters are calendar quarters.",
-             "Rates apply by shipment date. Matalan Rebate = Unit Price × Carton QTY × Rebate Rate; "
-             "PACD = (Total Amount − Matalan Rebate) × PACD Rate."]
+             "Rates apply by shipment date. Matalan Rebate = Unit Price × Carton QTY × Matalan Rate; "
+             "PACD Rebate = (Total Amount − Matalan Rebate) × PACD Rate."]
     rows.keep_together(12 + 16 + 14 + 26)
     rows.add(12)
     _span(ws, rows.add(16), 1, ncols, "Notes", font=_font(9, bold=True, color=GREY_HEX), align=NOTE)

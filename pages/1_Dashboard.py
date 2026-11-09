@@ -50,17 +50,17 @@ def summary_table(data):
         "packaging_supplier": "Packaging supplier",
         "quarter_label": "Quarter",
         "carton_type": "Carton type",
-        "pacd_rate": "PACD rate",
-        "rebate_rate": "Rebate rate",
+        "pacd_rate": "PACD Rate",
+        "rebate_rate": "Matalan Rate",
         "cartons": "Carton QTY",
         "total_amount": "Total amount",
-        "pacd": "PACD",
+        "pacd": "PACD Rebate",
         "matalan_rebate": "Matalan rebate",
     }).copy()
-    table["PACD rate"] = table["PACD rate"].map(rate_text)
-    table["Rebate rate"] = table["Rebate rate"].map(rate_text)
-    shown = ["Packaging supplier", "Quarter", "Carton type", "PACD rate",
-             "Rebate rate", "Carton QTY", "Total amount", "PACD", "Matalan rebate"]
+    table["PACD Rate"] = table["PACD Rate"].map(rate_text)
+    table["Matalan Rate"] = table["Matalan Rate"].map(rate_text)
+    shown = ["Packaging supplier", "Quarter", "Carton type", "PACD Rate",
+             "Matalan Rate", "Carton QTY", "Total amount", "PACD Rebate", "Matalan rebate"]
     query = table_search("Search live summary", "dashboard_summary_search")
     table = search_frame(table[shown], query)
     if table.empty:
@@ -72,7 +72,7 @@ def summary_table(data):
             "Packaging supplier": st.column_config.TextColumn(pinned=True),
             "Carton QTY": st.column_config.NumberColumn(format="localized"),
             **{column: st.column_config.NumberColumn(format="$ %.2f")
-               for column in ("Total amount", "PACD", "Matalan rebate")},
+               for column in ("Total amount", "PACD Rebate", "Matalan rebate")},
         },
         key="live_summary_table",
     )
@@ -83,7 +83,7 @@ def supplier_totals_table(data):
              [["cartons", "total_amount", "pacd", "matalan_rebate"]].sum()
              .rename(columns={
                  "packaging_supplier": "Packaging supplier", "cartons": "Carton QTY",
-                 "total_amount": "Total amount", "pacd": "PACD",
+                 "total_amount": "Total amount", "pacd": "PACD Rebate",
                  "matalan_rebate": "Matalan rebate",
              }))
     table = search_frame(table, table_search(
@@ -97,7 +97,7 @@ def supplier_totals_table(data):
             "Packaging supplier": st.column_config.TextColumn(pinned=True),
             "Carton QTY": st.column_config.NumberColumn(format="localized"),
             **{column: st.column_config.NumberColumn(format="$ %.2f")
-               for column in ("Total amount", "PACD", "Matalan rebate")},
+               for column in ("Total amount", "PACD Rebate", "Matalan rebate")},
         },
         key="dashboard_supplier_totals_table",
     )
