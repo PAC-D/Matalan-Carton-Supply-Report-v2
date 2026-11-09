@@ -1315,3 +1315,8 @@ def test_app_warns_which_vendors_a_replace_drops(tmp_path, monkeypatch):
     at = AppTest.from_file(str(HERE / "pages" / "5_Import.py"), default_timeout=30).run()
     assert not at.exception
     assert "Current eBiz data will be removed for: NOBODY, OTHER." in [w.value for w in at.warning]
+
+
+def test_docker_build_replaces_the_streamlit_tab_title():
+    text = (HERE / "Dockerfile").read_text(encoding="utf-8")
+    assert "s|<title>Streamlit</title>|<title>Matalan Carton Supply Report</title>|" in text

@@ -9,6 +9,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
+# Streamlit's page says "Streamlit" in the tab until the app loads; fails the build if the file moves.
+RUN sed -i 's|<title>Streamlit</title>|<title>Matalan Carton Supply Report</title>|' \
+    "$(python -c 'import streamlit, os; print(os.path.dirname(streamlit.__file__))')/static/index.html"
 
 RUN useradd --uid 1000 --create-home app \
     && mkdir -p /app/Reports \
