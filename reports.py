@@ -734,16 +734,36 @@ def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filen
 def _xlsx_header(ws, row, headers):
     for i, h in enumerate(headers, 1):
         cell = ws.cell(row, i, h)
-        cell.font, cell.fill = HEAD_FONT, HEAD_FILL
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.font, cell.border = XLSX_HEAD_FONT, XLSX_HEAD_LINE
+        cell.alignment = Alignment(horizontal="left", vertical="bottom", wrap_text=True)
     return row + 1
+
+
+XLSX_HEAD_FONT = _font(9, color="57534D")
+XLSX_HEAD_LINE = Border(bottom=Side("medium", color="1D1C1A"))
+KRAFT_FILL = PatternFill("solid", fgColor="F5F0E6")
+TOTAL_LINE = Border(bottom=Side("thin", color="1D1C1A"))
+
+
+def _xlsx_statement(ws, kind, supplier_name, period, row_line, figures):
+    """The PDF statement block at the top of a sheet; figures are (label, number, format). Returns the next row."""
+    _cell(ws, 1, 1, kind, font=_font(9, color="57534D"))
+    _cell(ws, 2, 1, supplier_name, font=_font(14, bold=True, color="1D1C1A"))
+    _cell(ws, 3, 1, period, font=_font(10, color="1D1C1A"))
+    if row_line:
+        _cell(ws, 4, 1, row_line, font=_font(9, color="57534D"))
+    for i, (label, value, fmt) in enumerate(figures):
+        col = 4 + 3 * i
+        _cell(ws, 1, col, label, font=_font(9, color="57534D"))
+        _cell(ws, 2, col, value, font=_font(14, color="1D1C1A"), fmt=fmt, align=Alignment(horizontal="left"))
+    return 7
 
 
 def _xlsx_total(ws, row, label, rows, cols, fill):
     """A total line: label in column A, the summed figures under their columns (from B). Returns the next row."""
-    _cell(ws, row, 1, label, font=BODY_BOLD, fill=fill)
+    _cell(ws, row, 1, label, font=BODY_BOLD, fill=fill, border=TOTAL_LINE)
     for i, col in enumerate(cols, 2):
-        cell = _cell(ws, row, i, None, font=BODY_BOLD, fill=fill)
+        cell = _cell(ws, row, i, None, font=BODY_BOLD, fill=fill, border=TOTAL_LINE)
         if col in SUM_COLS:
             cell.value = round(sum(r[col] or 0 for r in rows), 2)
             cell.number_format = XLSX_FORMATS.get(col, "#,##0")
@@ -753,6 +773,17 @@ def _xlsx_total(ws, row, label, rows, cols, fill):
 def _xlsx_widths(ws, cols, extra=()):
     width = dict(zip(RAW_COLS, RAW_WIDTHS))
     _widths(ws, [8] + [width[c] for c in cols] + list(extra))
+
+
+def _xlsx_figures(rows, cols):
+    """Statement figures for a tracker workbook: the PDF's labels with numbers Excel can use."""
+    pacd, matalan = core.rate_headers(rows)
+    figures = [("Cartons shipped", sum(r["carton_qty"] or 0 for r in rows), "#,##0"),
+               ("Total amount", round(sum(r["total_amount"] or 0 for r in rows), 2), "$#,##0.00")]
+    if "pacd" in cols:
+        figures.append((pacd, round(sum(r["pacd"] or 0 for r in rows), 2), "$#,##0.00"))
+    figures.append((matalan, round(sum(r["matalan_rebate"] or 0 for r in rows), 2), "$#,##0.00"))
+    return figures
 
 
 def _xlsx_note(ws, row, text):
@@ -766,30 +797,33 @@ def _tracker_xlsx(con, supplier, fiscal_year, quarters, brand, report_name, file
     if not parts:
         return None
     cols, blocks, title, base_name = parts
+    all_rows = [r for _, rows in blocks for r in rows]
+    kind = "Rebate statement" if report_name.startswith("Rebate") else "Full tracker"
     wb = Workbook()
     ws = wb.active
     ws.title = table_title[:31]
-    _cell(ws, 1, 1, title, font=HEADING)
-    row = 3
+    row_line = f"{'Rows with eBiz SO#' if so_only else 'All tracker rows'} · {len(all_rows):,} shipments"
+    row = _xlsx_statement(ws, kind, core.supplier_name(con, supplier), _period(fiscal_year, quarters), row_line,
+                          _xlsx_figures(all_rows, cols))
     for label, rows in blocks:
         if not rows:
             continue
-        _banner(ws, row, f"{table_title} - {label} Carton", len(cols) + 1)
+        _cell(ws, row, 1, f"{label} carton", font=_font(11, bold=True, color="1D1C1A"))
         row = _xlsx_header(ws, row + 1, ["Sr No."] + _headers(rows, cols))
         sr = 0
         for (year, quarter), q_rows in groupby(rows, key=lambda r: (r["fiscal_year"], r["quarter"])):
             q_rows = list(q_rows)
             q_label = core.quarter_label(year, quarter)
-            _cell(ws, row, 1, f"{q_label} Quarter", font=HEADING)
+            _cell(ws, row, 1, f"{q_label} Quarter", font=_font(10, bold=True, color=NAVY_HEX))
             row += 1
             for r in q_rows:
                 sr += 1
                 ws.cell(row, 1, sr)
                 _xlsx_values(ws, row, 2, r, cols)
                 row += 1
-            row = _xlsx_total(ws, row, f"{q_label} Subtotal", q_rows, cols, SUBTOTAL_FILL)
-        row = _xlsx_total(ws, row, f"{label} Carton Total", rows, cols, GRAND_FILL) + 1
-    _xlsx_total(ws, row, "Tracker Grand Total", [r for _, rows in blocks for r in rows], cols, GRAND_FILL)
+            row = _xlsx_total(ws, row, f"{q_label} Subtotal", q_rows, cols, KRAFT_FILL)
+        row = _xlsx_total(ws, row, f"{label} Carton Total", rows, cols, KRAFT_FILL) + 1
+    _xlsx_total(ws, row, "Tracker Grand Total", all_rows, cols, KRAFT_FILL)
     _xlsx_widths(ws, cols)
     return f"{base_name}.xlsx", _bytes(wb)
 
@@ -904,13 +938,21 @@ def discrepancy_xlsx(con, supplier, xref):
     orders = {o["so"]: o for o in xref["orders"]}
     wb = Workbook()
     wb.remove(wb.active)
+    status_row = core.ebiz_status(con)
+    loaded = f"eBiz data loaded {status_row[2][:10]}" if status_row else "no eBiz data loaded"
+    counts = [(label, sum(o["status"] == label for o in xref["orders"]), "#,##0")
+              for label in ("Not in eBiz", "Tracker > eBiz", "Tracker < eBiz")]
+    counts += [("No SO#", sum(1 for rows in xref["rows"].values() for r in rows if not r["so"]), "#,##0"),
+               ("eBiz only", len(xref["ebiz_only"]), "#,##0")]
     for sheet, (status, heading, _, with_ebiz) in zip(DISCREPANCY_SHEETS, DISCREPANCY_SECTIONS):
         ws = wb.create_sheet(sheet)
-        _cell(ws, 1, 1, f"{heading} ({name})", font=HEADING)
-        row = 3
+        row = (_xlsx_statement(ws, "Discrepancy report", name, f"All shipments · {loaded}", None, counts)
+               if len(wb.worksheets) == 1 else 1)
+        _cell(ws, row, 1, heading, font=_font(11, bold=True, color="1D1C1A"))
+        row += 2
         blocks = _discrepancy_blocks(xref, orders, status)
         for label, rows in blocks:
-            _banner(ws, row, f"{label} Carton", len(TRACKER_COLS) + 1 + with_ebiz)
+            _cell(ws, row, 1, f"{label} carton", font=_font(10, bold=True, color="1D1C1A"))
             row = _xlsx_header(ws, row + 1, ["SL"] + _headers(rows, TRACKER_COLS) + ["eBiz QTY"] * with_ebiz)
             for i, r in enumerate(rows, 1):
                 ws.cell(row, 1, i)
@@ -918,7 +960,7 @@ def discrepancy_xlsx(con, supplier, xref):
                 if with_ebiz:
                     ws.cell(row, len(TRACKER_COLS) + 2, orders[r["so"]]["ebiz_qty"]).number_format = "#,##0"
                 row += 1
-            row = _xlsx_total(ws, row, "Total", rows, TRACKER_COLS, GRAND_FILL) + 1
+            row = _xlsx_total(ws, row, "Total", rows, TRACKER_COLS, KRAFT_FILL) + 1
         if not blocks:
             _xlsx_note(ws, row, "No discrepancies found.")
         _xlsx_widths(ws, TRACKER_COLS, [10] * with_ebiz)
@@ -934,10 +976,10 @@ def discrepancy_xlsx(con, supplier, xref):
                 if col in core.EBIZ_REAL:
                     cell.number_format = "#,##0" if col == "qty_shipped" else "#,##0.00"
             row += 1
-        _cell(ws, row, 1, "Total", font=BODY_BOLD, fill=GRAND_FILL)
+        _cell(ws, row, 1, "Total", font=BODY_BOLD, fill=KRAFT_FILL, border=TOTAL_LINE)
         for col in ("qty_shipped", "total_rebate"):
             _cell(ws, row, EBIZ_PDF_COLS.index(col) + 2, round(sum(e[col] or 0 for e in ebiz), 2), font=BODY_BOLD,
-                  fill=GRAND_FILL, fmt="#,##0" if col == "qty_shipped" else "#,##0.00")
+                  fill=KRAFT_FILL, border=TOTAL_LINE, fmt="#,##0" if col == "qty_shipped" else "#,##0.00")
     else:
         _xlsx_note(ws, 3, "No discrepancies found.")
     _widths(ws, [6, 30, 12, 20, 20, 12, 14, 14, 14, 10])

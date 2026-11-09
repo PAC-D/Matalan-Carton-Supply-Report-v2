@@ -1060,7 +1060,7 @@ def test_full_tracker_xlsx_matches_the_pdf(demo_con):
     assert xlsx_total(data, "Q3 2026 (Jul-Sep) Subtotal") == sum(
         r["carton_qty"] for r in core.rows(demo_con, "STD", supplier=TW_KEY))
     cells = [c for row in openpyxl.load_workbook(BytesIO(data)).active.iter_rows(values_only=True) for c in row]
-    assert "Full Tracker Report (Transworld Packaging (BD) Ltd.)" in cells
+    assert "Full tracker" in cells and "Transworld Packaging (BD) Ltd." in cells
     assert any(isinstance(c, date) for c in cells)  # dates are real Excel dates
     _, matalan = reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [3], "Matalan")
     header = next(r for r in openpyxl.load_workbook(BytesIO(matalan)).active.iter_rows(values_only=True)
@@ -1436,3 +1436,18 @@ def test_statement_pdf_variants(demo_con, xref_con):
     assert "PACD" not in matalan and "Full tracker" in matalan
     disc = pdf_text(reports.discrepancy_pdf(xref_con, "PACK", core.cross_reference(xref_con, "PACK"))[1])
     assert "All shipments · eBiz data loaded" in disc and "Discrepancy report" in disc
+
+
+def test_excel_twins_have_the_statement_header_and_keep_l_and_w(demo_con, xref_con):
+    _, data = reports.rebate_report_xlsx(demo_con, TW_KEY, 2026, [3])
+    rows = list(openpyxl.load_workbook(BytesIO(data)).active.iter_rows(values_only=True))
+    cells = [c for r in rows for c in r if c is not None]
+    for expected in ("Rebate statement", "Transworld Packaging (BD) Ltd.", "Q3 2026 · 1 Jul – 30 Sep 2026",
+                     "All tracker rows · 146 shipments", "Cartons shipped", "PACD Rebate", "Matalan Rebate (5%)"):
+        assert expected in cells, expected
+    assert 52115 in cells  # figures are numbers Excel can use, not text
+    header = next(r for r in rows if "Carton QTY" in r)
+    assert "L" in header and "W" in header
+    _, disc = reports.discrepancy_xlsx(xref_con, "PACK", core.cross_reference(xref_con, "PACK"))
+    first = [c for r in openpyxl.load_workbook(BytesIO(disc)).worksheets[0].iter_rows(values_only=True) for c in r]
+    assert "Discrepancy report" in first and "Pack A Ltd." in first
