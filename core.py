@@ -1010,6 +1010,63 @@ def update_tracker_rows(con, kind, edited):
     return len(prepared)
 
 
+def _delete(con, table, where, params):
+    """DELETE in the caller's transaction; returns the number of rows removed."""
+    return con.execute(f"DELETE FROM {table} WHERE {where}", params).rowcount
+
+
+def delete_tracker_rows(con, kind, ids):
+    """Delete these row ids from one tracker sheet. Ids already gone are ignored. Returns rows deleted."""
+    if kind not in TABLES:
+        raise ValueError("Carton type must be STD or CUS.")
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0
+    with con.transaction():
+        count = _delete(con, TABLES[kind], "id = ANY(%s)", (ids,))
+        if count:
+            _bump_revision(con)
+    return count
+
+
+def _delete_both(con, where, params):
+    with con.transaction():
+        counts = {kind: _delete(con, table, where, params) for kind, table in TABLES.items()}
+        if any(counts.values()):
+            _bump_revision(con)
+    return counts
+
+
+def delete_supplier_month(con, supplier, month):
+    """Delete one supplier's dated rows shipped in `month` (YYYY-MM) from both sheets. Returns {kind: rows}."""
+    return _delete_both(con, "supplier_key IS NOT DISTINCT FROM %s AND substr(shipment_date, 1, 7) = %s",
+                        (supplier, month))
+
+
+def delete_source_file(con, source_file):
+    """Delete every tracker row imported from `source_file`, both sheets. Returns {kind: rows}."""
+    return _delete_both(con, "source_file = %s", (source_file,))
+
+
+def tracker_months(con, supplier):
+    """Shipment months (YYYY-MM) with dated rows for this supplier, newest first."""
+    sql = " UNION ".join(f"SELECT substr(shipment_date, 1, 7) AS month FROM {table} "
+                         "WHERE supplier_key IS NOT DISTINCT FROM %s AND shipment_date IS NOT NULL"
+                         for table in TABLES.values())
+    return [r[0] for r in con.execute(f"SELECT month FROM ({sql}) ORDER BY month DESC", (supplier,) * len(TABLES))]
+
+
+def tracker_files(con):
+    """One dict per imported source file: source_file, STD and CUS row counts, latest imported_at; newest first."""
+    sql = " UNION ALL ".join(f"SELECT '{kind}' AS kind, source_file, imported_at FROM {table}"
+                             for kind, table in TABLES.items())
+    rows = con.execute(
+        f"SELECT source_file, COUNT(*) FILTER (WHERE kind = 'STD'), COUNT(*) FILTER (WHERE kind = 'CUS'), "
+        f"MAX(imported_at) FROM ({sql}) WHERE source_file IS NOT NULL "
+        f"GROUP BY source_file ORDER BY MAX(imported_at) DESC NULLS LAST, source_file")
+    return [{"source_file": f, "STD": std, "CUS": cus, "imported_at": at} for f, std, cus, at in rows]
+
+
 def summary_rows(con, fiscal_year, supplier=None):
     """The generated Summary workbook's supplier/quarter/carton-type rows.
 

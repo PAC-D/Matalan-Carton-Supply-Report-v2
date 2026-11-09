@@ -1320,3 +1320,58 @@ def test_app_warns_which_vendors_a_replace_drops(tmp_path, monkeypatch):
 def test_docker_build_replaces_the_streamlit_tab_title():
     text = (HERE / "Dockerfile").read_text(encoding="utf-8")
     assert "s|<title>Streamlit</title>|<title>Matalan Carton Supply Report</title>|" in text
+
+
+def test_delete_selected_tracker_rows_and_a_stale_repeat():
+    con = core.connect()
+    for qty in (1, 2, 3):
+        insert(con, "STD", shipment_date="2026-08-03", supplier_key="PACK", carton_qty=qty)
+    ids = [r["id"] for r in core.editable_rows(con, "STD", "PACK")][:2]
+    revision = core.data_revision(con)
+    assert core.delete_tracker_rows(con, "STD", ids) == 2
+    assert [r["carton_qty"] for r in core.editable_rows(con, "STD", "PACK")] == [3]
+    assert core.data_revision(con) != revision
+    assert core.delete_tracker_rows(con, "STD", ids) == 0  # already gone in another tab
+
+
+def test_delete_supplier_month_clears_both_sheets_but_not_undated_rows():
+    con = core.connect()
+    insert(con, "STD", shipment_date="2026-08-03", supplier_key="PACK", carton_qty=1)
+    insert(con, "CUS", shipment_date="2026-08-20", supplier_key="PACK", carton_qty=2)
+    insert(con, "STD", shipment_date="2026-07-31", supplier_key="PACK", carton_qty=3)
+    insert(con, "STD", shipment_date="2026-08-03", supplier_key="OTHER", carton_qty=4)
+    insert(con, "STD", shipment_date=None, supplier_key="PACK", carton_qty=5)
+    assert core.tracker_months(con, "PACK") == ["2026-08", "2026-07"]
+    assert core.delete_supplier_month(con, "PACK", "2026-08") == {"STD": 1, "CUS": 1}
+    left = sorted(r["carton_qty"] for k in core.TABLES for r in core.editable_rows(con, k))
+    assert left == [3, 4, 5]
+
+
+def test_delete_source_file(tmp_path):
+    con = core.connect()
+    core.save_many(con, {"a.xlsx": core.read_workbook(make_xlsx(tmp_path / "a.xlsx", std=[rec()], cus=[rec()])),
+                         "b.xlsx": core.read_workbook(make_xlsx(tmp_path / "b.xlsx", std=[rec(sup="Other Ltd")]))})
+    assert [(f["source_file"], f["STD"], f["CUS"]) for f in core.tracker_files(con)] in (
+        [("a.xlsx", 1, 1), ("b.xlsx", 1, 0)], [("b.xlsx", 1, 0), ("a.xlsx", 1, 1)])
+    assert core.delete_source_file(con, "a.xlsx") == {"STD": 1, "CUS": 1}
+    assert [f["source_file"] for f in core.tracker_files(con)] == ["b.xlsx"]
+
+
+def test_tracker_page_offers_the_delete_tools(xref_con):
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(HERE / "pages" / "3_Tracker.py"), default_timeout=60).run()
+    assert not at.exception
+    assert at.radio(key="tracker_delete_mode").options == ["Selected rows", "Supplier and month", "Imported file"]
+
+
+def test_tracker_page_deletes_an_imported_file_only_after_confirming():
+    from streamlit.testing.v1 import AppTest
+    con = core.connect()
+    core.save_many(con, {DEMO.name: core.read_workbook(DEMO)})
+    at = AppTest.from_file(str(HERE / "pages" / "3_Tracker.py"), default_timeout=60).run()
+    at.radio(key="tracker_delete_mode").set_value("Imported file").run()
+    next(b for b in at.button if b.label == "Delete this file's rows").click().run()
+    assert sum(core.editable_row_count(con, k) for k in core.TABLES) == 206  # nothing gone before confirming
+    next(b for b in at.button if b.label == "Delete").click().run()
+    assert not at.exception
+    assert sum(core.editable_row_count(con, k) for k in core.TABLES) == 0
