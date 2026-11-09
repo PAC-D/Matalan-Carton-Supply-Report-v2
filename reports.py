@@ -4,7 +4,7 @@ Each builder returns (file name, bytes), or None when the selection has no rows.
 `supplier` is a supplier key (core.supplier_key); titles and file names use core.supplier_name.
 """
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from itertools import groupby
 from pathlib import Path
@@ -461,21 +461,30 @@ def shipment_tracking_xlsx(con, supplier):
 ASSETS = Path(__file__).with_name("assets")
 PAGE = landscape(A4)
 MARGIN = 0.3 * inch
-NAVY, BLUE = colors.HexColor("#1F497D"), colors.HexColor("#4472C4")
-HEAD_BG, QUARTER_BG = colors.HexColor("#B4C6E7"), colors.HexColor("#D9E1F2")
-ALT_BG, SUBTOTAL_BG, TOTAL_BG = colors.HexColor("#EBF1FA"), colors.HexColor("#FFF2CC"), colors.HexColor("#DCE6F1")
-CELL = ParagraphStyle("cell", fontName="Helvetica", fontSize=5.5, leading=6.5)
-HEAD = ParagraphStyle("head", parent=CELL, fontName="Helvetica-Bold", textColor=NAVY, alignment=1)
+# Statement palette: warm ink neutrals, kraft for totals, navy only for quarter headings.
+INK, INK2, INK3 = colors.HexColor("#1D1C1A"), colors.HexColor("#57534D"), colors.HexColor("#8B857C")
+HAIR = colors.Color(29 / 255, 28 / 255, 26 / 255, alpha=0.12)
+KRAFT = colors.HexColor("#F5F0E6")
+NAVY = colors.HexColor("#1F497D")
+CELL = ParagraphStyle("cell", fontName="Helvetica", fontSize=6, leading=7.2, textColor=INK)
+HEAD = ParagraphStyle("head", parent=CELL, fontSize=5.8, leading=7, textColor=INK2)
+HEAD_R = ParagraphStyle("head_r", parent=HEAD, alignment=2)
+SECTION = ParagraphStyle("section", fontName="Helvetica-Bold", fontSize=9, leading=11, textColor=INK)
 SUM_COLS = ["carton_qty", "final_price", "total_amount", "pacd", "matalan_rebate"]  # summed like the VBA
-BASE_WIDTHS = {
-    "sr": 16, "po_received_date": 30, "shipment_date": 30, "matalan_po": 30, "supplier_name": 48,
-    "factory_name": 48, "packaging_supplier": 48, "ebiz_customer_ref": 44, "ebiz_so": 30, "carton_qty": 26,
-    "carton_style": 40, "flute": 26, "carton_selection": 30, "length_mm": 22, "width_mm": 22, "height_mm": 22,
-    "l_mm": 22, "w_mm": 22, "area_sqm": 24, "unit_price": 28, "final_price": 30, "total_amount": 40,
-    "pacd": 34, "matalan_rebate": 34,
+NUM_COLS = {"carton_qty", "length_mm", "width_mm", "height_mm", "l_mm", "w_mm", "area_sqm", "unit_price",
+            "final_price", "total_amount", "pacd", "matalan_rebate"}
+PDF_COLS = [c for c in TRACKER_COLS if c not in ("l_mm", "w_mm")]  # L and W are left out of PDFs only
+PDF_LABELS = {"length_mm": "Length (mm)", "width_mm": "Width (mm)", "height_mm": "Height (mm)",
+              "area_sqm": "Area (sqm)"}
+BASE_WIDTHS = {  # share of the table width: names and references wide, sizes narrow, dates on one line
+    "sr": 14, "po_received_date": 34, "shipment_date": 34, "matalan_po": 28, "supplier_name": 52,
+    "factory_name": 52, "packaging_supplier": 52, "ebiz_customer_ref": 56, "ebiz_so": 30, "carton_qty": 24,
+    "carton_style": 40, "flute": 26, "carton_selection": 26, "length_mm": 22, "width_mm": 22, "height_mm": 22,
+    "l_mm": 20, "w_mm": 18, "area_sqm": 22, "unit_price": 30, "final_price": 28, "total_amount": 34,
+    "pacd": 32, "matalan_rebate": 34,
 }
-PADDING = [("LEFTPADDING", (0, 0), (-1, -1), 1.5), ("RIGHTPADDING", (0, 0), (-1, -1), 1.5),
-           ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]
+PADDING = [("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+           ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]
 
 
 def _fmt(col, value):
@@ -483,8 +492,7 @@ def _fmt(col, value):
     if value is None:
         return ""
     if col in core.DATE_COLS:
-        d = date.fromisoformat(value)
-        return f"{d.month}/{d.day}/{d.year}"
+        return f"{date.fromisoformat(value):%d %b %Y}"
     if col in ("carton_qty", "length_mm", "width_mm", "height_mm", "l_mm", "w_mm"):
         return f"{value:,.0f}"
     if col == "area_sqm":
@@ -492,8 +500,14 @@ def _fmt(col, value):
     if col == "unit_price":
         return f"{value:.2f}"
     if col in ("final_price", "total_amount", "pacd", "matalan_rebate"):
-        return f"$ {value:,.2f}"
+        return f"${value:,.2f}"
     return Paragraph(escape(str(value)), CELL)
+
+
+def _pdf_headers(rows, cols):
+    """Header paragraphs for a tracker table: rate-aware rebate names, readable size labels, numbers right."""
+    return [Paragraph(escape(PDF_LABELS.get(c, h)), HEAD_R if c in NUM_COLS else HEAD)
+            for c, h in zip(cols, _headers(rows, cols))]
 
 
 def _total_line(text, rows, cols):
@@ -504,50 +518,107 @@ def _total_line(text, rows, cols):
     return line
 
 
-def _block(label, rows, cols, widths, table_title="Full Tracker Table"):
-    """One carton type: banners, header, per-quarter rows with subtotals, block total."""
-    qty_i = cols.index("carton_qty") + 1
-    data = []
+def _table_style(cols, first_body=1):
+    """Shared table look: ink rule under the header, hairlines between rows, numbers right-aligned."""
     style = PADDING + [
-        ("FONT", (0, 0), (-1, -1), "Helvetica", 5.5),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID", (0, 2), (-1, -1), 0.25, HEAD_BG),
-        ("ALIGN", (qty_i, 3), (-1, -1), "RIGHT"),
-        ("BACKGROUND", (0, 2), (-1, 2), HEAD_BG),
+        ("FONT", (0, 0), (-1, -1), "Helvetica", 6), ("TEXTCOLOR", (0, 0), (-1, -1), INK),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEBELOW", (0, first_body - 1), (-1, first_body - 1), 0.75, INK),
+        ("LINEBELOW", (0, first_body), (-1, -1), 0.4, HAIR),
+        ("TEXTCOLOR", (0, first_body), (0, -1), INK3),
     ]
+    for i, col in enumerate(cols, 1):
+        if col in NUM_COLS:
+            style.append(("ALIGN", (i, first_body), (i, -1), "RIGHT"))
+    return style
 
-    def banner(text, background, size, color=colors.white):
-        r = len(data)
-        data.append([text] + [""] * len(cols))
-        style.extend([("SPAN", (0, r), (-1, r)), ("BACKGROUND", (0, r), (-1, r), background),
-                      ("TEXTCOLOR", (0, r), (-1, r), color), ("FONT", (0, r), (-1, r), "Helvetica-Bold", size)])
 
-    def total(text, total_rows, background):
-        r = len(data)
-        data.append(_total_line(text, total_rows, cols))
-        style.extend([("SPAN", (0, r), (qty_i - 1, r)), ("BACKGROUND", (0, r), (-1, r), background),
-                      ("FONT", (0, r), (-1, r), "Helvetica-Bold", 5.5), ("ALIGN", (0, r), (-1, r), "RIGHT")])
+def _total_style(r, span_to):
+    return [("SPAN", (0, r), (span_to, r)), ("BACKGROUND", (0, r), (-1, r), KRAFT),
+            ("FONT", (0, r), (-1, r), "Helvetica-Bold", 6), ("TEXTCOLOR", (0, r), (0, r), INK),
+            ("LINEBELOW", (0, r), (-1, r), 0.75, INK)]
 
-    banner(f"{table_title} - {label}", NAVY, 9)
-    banner(f"{label} Carton", BLUE, 7)
-    data.append([Paragraph("Sr No.", HEAD)] + [Paragraph(escape(h), HEAD) for h in _headers(rows, cols)])
+
+def _block(label, rows, cols, widths):
+    """One carton type: section heading, then header, per-quarter rows with subtotals and the carton total."""
+    qty_i = cols.index("carton_qty") + 1
+    data = [[Paragraph("#", HEAD)] + _pdf_headers(rows, cols)]
+    style = _table_style(cols)
     sr = 0
     for (year, quarter), q_rows in groupby(rows, key=lambda r: (r["fiscal_year"], r["quarter"])):
         q_rows = list(q_rows)
         q_label = core.quarter_label(year, quarter)
-        banner(f"{q_label} Quarter", QUARTER_BG, 6, NAVY)
-        for i, r in enumerate(q_rows):
+        r = len(data)
+        data.append([f"{q_label} Quarter"] + [""] * len(cols))
+        style += [("SPAN", (0, r), (-1, r)), ("FONT", (0, r), (-1, r), "Helvetica-Bold", 6.5),
+                  ("TEXTCOLOR", (0, r), (-1, r), NAVY), ("TOPPADDING", (0, r), (-1, r), 5),
+                  ("LINEBELOW", (0, r), (-1, r), 0, colors.white)]
+        for row in q_rows:
             sr += 1
-            data.append([str(sr)] + [_fmt(c, r[c]) for c in cols])
-            if i % 2:
-                style.append(("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), ALT_BG))
-        total(f"{q_label} Subtotal", q_rows, SUBTOTAL_BG)
-    total(f"{label} Carton Total", rows, TOTAL_BG)
-    return Table(data, colWidths=widths, repeatRows=3, style=TableStyle(style))
+            data.append([str(sr)] + [_fmt(c, row[c]) for c in cols])
+        style += _total_style(len(data), qty_i - 1)
+        data.append(_total_line(f"{q_label} Subtotal", q_rows, cols))
+    style += _total_style(len(data), qty_i - 1)
+    data.append(_total_line(f"{label} Carton Total", rows, cols))
+    heading = Paragraph(f'{label} carton <font name="Helvetica" color="#8B857C" size="7">'
+                        f'{len(rows):,} shipments</font>', SECTION)
+    return [CondPageBreak(1.2 * inch), heading, Spacer(1, 4),
+            Table(data, colWidths=widths, repeatRows=1, style=TableStyle(style))]
+
+
+def _mark(lines, width=None):
+    """The shipping-mark box: a 2 pt outline with a 0.75 pt outline 3 pt inside it, as stencilled on export cartons."""
+    inner = Table([[line] for line in lines], colWidths=None if width is None else [width - 6],
+                  style=TableStyle([("BOX", (0, 0), (-1, -1), 0.75, INK),
+                                    ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                                    ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+                                    ("TOPPADDING", (0, 0), (-1, 0), 7), ("BOTTOMPADDING", (0, -1), (-1, -1), 7)]))
+    return Table([[inner]], style=TableStyle([("BOX", (0, 0), (-1, -1), 2, INK),
+                                              *[(k, (0, 0), (-1, -1), 3) for k in
+                                                ("LEFTPADDING", "RIGHTPADDING", "TOPPADDING", "BOTTOMPADDING")]]))
+
+
+def _p(text, size, color=INK, bold=False, leading=None):
+    return Paragraph(escape(text), ParagraphStyle(
+        "x", fontName="Helvetica-Bold" if bold else "Helvetica", fontSize=size, leading=leading or size * 1.25,
+        textColor=color))
+
+
+def _statement(kind, supplier_name, period, row_line, figures, meta):
+    """Page-1 header: the shipping-mark box (who and when) beside equal-weight figures and a meta line."""
+    avail = PAGE[0] - 2 * MARGIN
+    mark_lines = [_p(kind, 7.5, INK2), _p(supplier_name, 12, bold=True), _p(period, 9)]
+    if row_line:
+        mark_lines.append(_p(row_line, 7.5, INK2))
+    mark = _mark(mark_lines, 3.1 * inch)
+    figs = Table([[_p(label, 7, INK2) for label, _ in figures], [_p(value, 13, leading=16) for _, value in figures]],
+                 style=TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 22),
+                                   ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                                   ("VALIGN", (0, 0), (-1, -1), "BOTTOM")]))
+    right = Table([[figs], [_p(meta, 6.5, INK3)]],
+                  style=TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("TOPPADDING", (0, 1), (-1, 1), 6),
+                                    ("VALIGN", (0, 0), (-1, -1), "BOTTOM")]))
+    head = Table([[mark, right]], colWidths=[3.3 * inch, avail - 3.3 * inch],
+                 style=TableStyle([("VALIGN", (0, 0), (-1, -1), "BOTTOM"), ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                   ("LEFTPADDING", (1, 0), (1, 0), 22), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                                   ("LINEBELOW", (0, 0), (-1, 0), 0.5, HAIR)]))
+    return [head, Spacer(1, 10)]
+
+
+def _period(fiscal_year, quarters):
+    """'Q3 2026 · 1 Jul – 30 Sep 2026' for the selected quarters (Q1 2026 starts 1 Dec 2025)."""
+    qs = sorted(quarters)
+    first, last = qs[0], qs[-1]
+    start = date(2025, 12, 1) if (int(fiscal_year), first) == (2026, 1) else date(fiscal_year, 3 * first - 2, 1)
+    end_month = 3 * last
+    end = (date(fiscal_year + 1, 1, 1) if end_month == 12 else date(fiscal_year, end_month + 1, 1)) - timedelta(1)
+    span = f"Q{first}" if first == last else f"Q{first}–Q{last}"
+    start_text = f"{start.day} {start:%b}" + (f" {start.year}" if start.year != end.year else "")
+    return f"{span} {fiscal_year} · {start_text} – {end.day} {end:%b %Y}"
 
 
 class _NumberedCanvas(rl_canvas.Canvas):
-    """Canvas that adds 'Page x of y' once the page count is known."""
+    """Canvas that adds the 'Sheet x of y' shipping-mark box once the page count is known."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -560,22 +631,24 @@ class _NumberedCanvas(rl_canvas.Canvas):
     def save(self):
         for page in self._pages:
             self.__dict__.update(page)
-            self.setFont("Helvetica", 7)
-            self.drawRightString(PAGE[0] - MARGIN, 0.2 * inch, f"Page {self._pageNumber} of {len(self._pages)}")
+            text = f"Sheet {self._pageNumber} of {len(self._pages)}"
+            self.setFont("Helvetica-Bold", 7)
+            w = self.stringWidth(text, "Helvetica-Bold", 7) + 12
+            x, y, h = PAGE[0] - MARGIN - w, 0.16 * inch, 13
+            self.setStrokeColor(INK)
+            self.setLineWidth(1.2)
+            self.rect(x, y, w, h)
+            self.setLineWidth(0.5)
+            self.rect(x + 2, y + 2, w - 4, h - 4)
+            self.setFillColor(INK)
+            self.drawCentredString(x + w / 2, y + 4.2, text)
             super().showPage()
         super().save()
 
 
-def _title_bar(title, avail):
-    return Table([[title]], colWidths=[avail], style=TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), NAVY), ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
-        ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 14), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
-
-
-def _pdf(story, title):
-    """Landscape A4 PDF bytes with both logos, the generated time and 'Page x of y' on every page."""
-    generated = datetime.now().strftime("Generated: %d-%b-%Y %I:%M %p")
+def _pdf(story, title, footer):
+    """Landscape A4 PDF bytes: small logos on every page, `footer` and the generated time at the foot."""
+    generated = datetime.now().strftime("Generated %d %b %Y, %H:%M")
 
     def decorate(c, doc):
         c.saveState()
@@ -584,17 +657,19 @@ def _pdf(story, title):
             if path.exists():
                 img = ImageReader(str(path))
                 iw, ih = img.getSize()
-                h = 0.45 * inch
+                h = 0.25 * inch
                 w = iw * h / ih
                 c.drawImage(img, PAGE[0] - MARGIN - w if right else MARGIN, PAGE[1] - 0.3 * inch - h, w, h,
                             mask="auto")
-        c.setFont("Helvetica", 7)
-        c.drawString(MARGIN, 0.2 * inch, generated)
+        c.setFont("Helvetica", 6.5)
+        c.setFillColor(INK3)
+        c.drawString(MARGIN, 0.2 * inch, footer)
+        c.drawCentredString(PAGE[0] / 2, 0.2 * inch, generated)
         c.restoreState()
 
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=PAGE, leftMargin=MARGIN, rightMargin=MARGIN,
-                            topMargin=0.9 * inch, bottomMargin=0.45 * inch, title=title)
+                            topMargin=0.7 * inch, bottomMargin=0.5 * inch, title=title)
     doc.build(story, onFirstPage=decorate, onLaterPages=decorate, canvasmaker=_NumberedCanvas)
     return buf.getvalue()
 
@@ -617,27 +692,43 @@ def _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, fil
             filename.format(brand=brand, name=safe_name(name), span=span, year=fiscal_year))
 
 
+def _statement_figures(rows, cols):
+    """(label, value) pairs for the statement: cartons, total amount and each rebate column the report shows."""
+    pacd, matalan = core.rate_headers(rows)
+    pairs = [("Cartons shipped", f"{sum(r['carton_qty'] or 0 for r in rows):,.0f}"),
+             ("Total amount", f"${sum(r['total_amount'] or 0 for r in rows):,.2f}")]
+    if "pacd" in cols:
+        pairs.append((pacd, f"${sum(r['pacd'] or 0 for r in rows):,.2f}"))
+    pairs.append((matalan, f"${sum(r['matalan_rebate'] or 0 for r in rows):,.2f}"))
+    return pairs
+
+
 def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filename,
                  table_title="Full Tracker Table", so_only=False):
     parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename, so_only)
     if not parts:
         return None
     cols, blocks, title, base_name = parts
+    cols = [c for c in cols if c in PDF_COLS]
     all_rows = [r for _, rows in blocks for r in rows]
+    name = core.supplier_name(con, supplier)
+    kind = "Rebate statement" if report_name.startswith("Rebate") else "Full tracker"
+    period = _period(fiscal_year, quarters)
+    row_line = (f"{'Rows with eBiz SO#' if so_only else 'All tracker rows'} · {len(all_rows):,} shipments")
+    counts = " · ".join(f"{label} carton {len(rows):,} rows" for label, rows in blocks)
     avail = PAGE[0] - 2 * MARGIN
     base = [BASE_WIDTHS["sr"]] + [BASE_WIDTHS[c] for c in cols]
     widths = [w * avail / sum(base) for w in base]
-    story = [_title_bar(title, avail), Spacer(1, 6)]
+    story = _statement(kind, name, period, row_line, _statement_figures(all_rows, cols), counts)
     for label, rows in blocks:
         if rows:
-            story += [_block(label, rows, cols, widths, table_title), Spacer(1, 8)]
+            story += _block(label, rows, cols, widths) + [Spacer(1, 10)]
     qty_i = cols.index("carton_qty") + 1
     story.append(Table([_total_line("Tracker Grand Total", all_rows, cols)], colWidths=widths,
-                       style=TableStyle(PADDING + [
-                           ("SPAN", (0, 0), (qty_i - 1, 0)), ("BACKGROUND", (0, 0), (-1, -1), NAVY),
-                           ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
-                           ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 6), ("ALIGN", (0, 0), (-1, -1), "RIGHT")])))
-    return f"{base_name}.pdf", _pdf(story, title)
+                       style=TableStyle(PADDING + _table_style(cols, 0)[3:] + _total_style(0, qty_i - 1) + [
+                           ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 6.5),
+                           ("LINEABOVE", (0, 0), (-1, 0), 0.75, INK)])))
+    return f"{base_name}.pdf", _pdf(story, title, f"{kind} · {name} · {period.split(' · ')[0]}")
 
 
 def _xlsx_header(ws, row, headers):
@@ -733,58 +824,49 @@ def rebate_report_xlsx(con, supplier, fiscal_year, quarters, so_only=False):
     return _tracker_xlsx(con, supplier, fiscal_year, quarters, "PacD", *_rebate(so_only), so_only=so_only)
 
 
-YELLOW = colors.HexColor("#FFFF99")
-NOTE_STYLE = ParagraphStyle("note", fontName="Helvetica-Oblique", fontSize=8, textColor=colors.HexColor("#595959"))
-DISCREPANCY_SECTIONS = [  # (order status, or None for rows without an SO#; title; bar colour; eBiz QTY column)
-    ("Not in eBiz", "Tracker Orders Not Found in eBiz", colors.HexColor("#C00000"), False),
-    ("Tracker > eBiz", "Quantity Mismatch (Tracker > eBiz)", colors.HexColor("#C55A11"), True),
-    ("Tracker < eBiz", "Quantity Mismatch (Tracker < eBiz)", colors.HexColor("#C55A11"), True),
-    (None, "Tracker Rows With No SO#", colors.HexColor("#505050"), False),
+YELLOW = colors.HexColor("#FFF4C2")  # rows matched through SO_2: the one meaningful highlight
+NOTE_STYLE = ParagraphStyle("note", fontName="Helvetica", fontSize=7.5, textColor=INK3)
+DISCREPANCY_SECTIONS = [  # (order status, or None for rows without an SO#; title; marker colour; eBiz QTY column)
+    ("Not in eBiz", "Tracker Orders Not Found in eBiz", colors.HexColor("#A33A2B"), False),
+    ("Tracker > eBiz", "Quantity Mismatch (Tracker > eBiz)", colors.HexColor("#A86A1E"), True),
+    ("Tracker < eBiz", "Quantity Mismatch (Tracker < eBiz)", colors.HexColor("#A86A1E"), True),
+    (None, "Tracker Rows With No SO#", INK2, False),
 ]
 EBIZ_PDF_COLS = ["vendor", "vendor_code", "product", "order_number", "qty_shipped", "net_price_1000",
                  "gross_price_1000", "total_rebate", "currency"]
 EBIZ_PDF_WIDTHS = [16, 90, 36, 60, 60, 30, 34, 34, 34, 24]  # SL, then EBIZ_PDF_COLS
 
 
-def _bar(text, background, avail):
-    return Table([[text]], colWidths=[avail], style=TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), background), ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
-        ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 10), ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
-
-
-def _section(text, background, avail, table):
-    """A section bar that never sits alone at a page foot: it moves to the next page unless there is room below it
-    for the "No discrepancies found." note, or (`table`) for the heading and first rows of a table, which can
-    run to many pages."""
-    return [CondPageBreak((1.3 if table else 0.65) * inch), _bar(text, background, avail), Spacer(1, 3)]
+def _section(text, color, avail, table):
+    """A section heading that never sits alone at a page foot: it moves to the next page unless there is room below
+    it for the "No discrepancies found." note, or (`table`) for the heading and first rows of a table."""
+    heading = Table([["", text]], colWidths=[8, avail - 8], style=TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), color), ("FONT", (1, 0), (1, 0), "Helvetica-Bold", 9.5),
+        ("TEXTCOLOR", (1, 0), (1, 0), INK), ("LEFTPADDING", (1, 0), (1, 0), 6), ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2), ("LINEBELOW", (0, 0), (-1, 0), 0.5, HAIR)]))
+    return [CondPageBreak((1.3 if table else 0.65) * inch), heading, Spacer(1, 4)]
 
 
 def _grid(header, lines, widths, total, right_from, highlight=(), banner=None):
-    """Bordered table: optional blue banner, header, lines (alternate shading, `highlight` line indexes pale
-    yellow) and a total line whose label spans the columns before `right_from`. Columns from `right_from`
-    align right."""
-    data = []
-    style = PADDING + [("FONT", (0, 0), (-1, -1), "Helvetica", 5.5), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]
+    """A statement table: optional carton-type label, header, lines (`highlight` line indexes pale yellow) and a
+    total line whose label spans the columns before `right_from`. Columns from `right_from` align right."""
+    data, style = [], list(PADDING)
     if banner:
         data.append([banner] + [""] * (len(widths) - 1))
-        style += [("SPAN", (0, 0), (-1, 0)), ("BACKGROUND", (0, 0), (-1, 0), BLUE),
-                  ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7)]
+        style += [("SPAN", (0, 0), (-1, 0)), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.5),
+                  ("TEXTCOLOR", (0, 0), (-1, 0), INK), ("BOTTOMPADDING", (0, 0), (-1, 0), 4)]
     head = len(data)
-    data.append([Paragraph(escape(h), HEAD) for h in header])
-    style += [("BACKGROUND", (0, head), (-1, head), HEAD_BG), ("GRID", (0, head), (-1, -1), 0.25, HEAD_BG),
+    data.append([Paragraph(escape(h), HEAD_R if i >= right_from else HEAD) for i, h in enumerate(header)])
+    style += [("FONT", (0, head + 1), (-1, -1), "Helvetica", 6), ("TEXTCOLOR", (0, head + 1), (-1, -1), INK),
+              ("VALIGN", (0, head), (-1, -1), "TOP"), ("LINEBELOW", (0, head), (-1, head), 0.75, INK),
+              ("LINEBELOW", (0, head + 1), (-1, -1), 0.4, HAIR), ("TEXTCOLOR", (0, head + 1), (0, -1), INK3),
               ("ALIGN", (right_from, head + 1), (-1, -1), "RIGHT")]
     for i, line in enumerate(lines):
         data.append(line)
-        r = len(data) - 1
         if i in highlight:
-            style.append(("BACKGROUND", (0, r), (-1, r), YELLOW))
-        elif i % 2:
-            style.append(("BACKGROUND", (0, r), (-1, r), ALT_BG))
-    r = len(data)
+            style.append(("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), YELLOW))
+    style += _total_style(len(data), right_from - 1)
     data.append(total)
-    style += [("SPAN", (0, r), (right_from - 1, r)), ("BACKGROUND", (0, r), (-1, r), TOTAL_BG),
-              ("FONT", (0, r), (-1, r), "Helvetica-Bold", 5.5), ("ALIGN", (0, r), (-1, r), "RIGHT")]
     return Table(data, colWidths=widths, repeatRows=head + 1, style=TableStyle(style))
 
 
@@ -872,20 +954,29 @@ def discrepancy_pdf(con, supplier, xref):
     title = f"Discrepancy Report ({name})"
     avail = PAGE[0] - 2 * MARGIN
     orders = {o["so"]: o for o in xref["orders"]}
-    qty_i = TRACKER_COLS.index("carton_qty") + 1
-    story = [_title_bar(title, avail), Spacer(1, 6)]
-    for status, heading, color, with_ebiz in DISCREPANCY_SECTIONS:
+    cols = PDF_COLS
+    qty_i = cols.index("carton_qty") + 1
+    status = core.ebiz_status(con)
+    loaded = f"eBiz data loaded {status[2][:10]}" if status else "no eBiz data loaded"
+    counts = [(label, sum(o["status"] == label for o in xref["orders"]))
+              for label in ("Not in eBiz", "Tracker > eBiz", "Tracker < eBiz")]
+    counts.append(("No SO#", sum(1 for rows in xref["rows"].values() for r in rows if not r["so"])))
+    counts.append(("eBiz only", len(xref["ebiz_only"])))
+    story = _statement("Discrepancy report", name, f"All shipments · {loaded}", None,
+                       [(label, f"{n:,}") for label, n in counts],
+                       "Orders compared on eBiz SO#; rows matched through SO_2 are highlighted")
+    for section_status, heading, color, with_ebiz in DISCREPANCY_SECTIONS:
         extra = 1 if with_ebiz else 0
-        base = [BASE_WIDTHS["sr"]] + [BASE_WIDTHS[c] for c in TRACKER_COLS] + [36] * extra  # 'eBiz QTY' fits
+        base = [BASE_WIDTHS["sr"]] + [BASE_WIDTHS[c] for c in cols] + [30] * extra  # 'eBiz QTY' fits
         widths = [w * avail / sum(base) for w in base]
         blocks = []
-        for label, rows in _discrepancy_blocks(xref, orders, status):
-            header = ["SL"] + _headers(rows, TRACKER_COLS) + ["eBiz QTY"] * extra
-            lines = [[str(i)] + [_fmt(c, r[c]) for c in TRACKER_COLS]
+        for label, rows in _discrepancy_blocks(xref, orders, section_status):
+            header = ["SL"] + [PDF_LABELS.get(c, h) for c, h in zip(cols, _headers(rows, cols))] + ["eBiz QTY"] * extra
+            lines = [[str(i)] + [_fmt(c, r[c]) for c in cols]
                      + ([f"{orders[r['so']]['ebiz_qty']:,.0f}"] if extra else []) for i, r in enumerate(rows, 1)]
             highlight = {i for i, r in enumerate(rows) if r["so"] and orders[r["so"]]["via_so2"]}
-            total = _total_line("Total", rows, TRACKER_COLS) + [""] * extra
-            blocks += [_grid(header, lines, widths, total, qty_i, highlight, f"{label} Carton"), Spacer(1, 6)]
+            total = _total_line("Total", rows, cols) + [""] * extra
+            blocks += [_grid(header, lines, widths, total, qty_i, highlight, f"{label} carton"), Spacer(1, 6)]
         story += _section(heading, color, avail, bool(blocks)) + (blocks or [_no_discrepancies(avail), Spacer(1, 6)])
     ebiz = xref["ebiz_only"]
     story += _section("eBiz Orders Not Found in Tracker", NAVY, avail, bool(ebiz))
@@ -899,7 +990,8 @@ def discrepancy_pdf(con, supplier, xref):
         story.append(_grid(header, lines, widths, total, 5, highlight))
     else:
         story.append(_no_discrepancies(avail))
-    return f"Discrepancy Report_{safe_name(name)}_{date.today():%d-%b-%Y}.pdf", _pdf(story, title)
+    return (f"Discrepancy Report_{safe_name(name)}_{date.today():%d-%b-%Y}.pdf",
+            _pdf(story, title, f"Discrepancy report · {name} · all shipments"))
 
 
 def build_all(con, suppliers, fiscal_year, quarters, discrepancy=False):

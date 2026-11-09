@@ -725,10 +725,10 @@ def test_full_tracker_pdf_pacd(demo_con):
     assert name == "Full Tracker Sheet for PacD_Transworld Packaging (BD) Ltd_Q3_2026.pdf"
     text = pdf_text(data)
     total = sum(r["total_amount"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
-    for expected in ("Full Tracker Report (Transworld Packaging (BD) Ltd.)", "Standard Carton",
+    for expected in ("Full tracker", "Transworld Packaging (BD) Ltd.", "Standard carton",
                      "Q3 2026 (Jul-Sep) Quarter", "Q3 2026 (Jul-Sep) Subtotal", "Standard Carton Total",
                      "Custom Carton Total", "Tracker Grand Total", f"{total:,.2f}", "PACD Rebate",
-                     "Page 1 of", "Generated:"):
+                     "Sheet 1 of", "Generated"):
         assert expected in text, expected
     assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2  # both logos
 
@@ -1014,8 +1014,8 @@ def test_discrepancy_pdf(xref_con):
     name, data = reports.discrepancy_pdf(xref_con, "PACK", core.cross_reference(xref_con, "PACK"))
     assert name == f"Discrepancy Report_Pack A Ltd_{date.today():%d-%b-%Y}.pdf"
     text = pdf_text(data)
-    for expected in ("Discrepancy Report (Pack A Ltd.)", *DISCREPANCY_TITLES, "Standard Carton", "eBiz QTY",
-                     "8888|8889", "Page 1 of", "Generated:"):
+    for expected in ("Discrepancy report", "Pack A Ltd.", *DISCREPANCY_TITLES, "Standard carton", "eBiz QTY",
+                     "8888|8889", "Sheet 1 of", "Generated"):
         assert expected in text, expected
     assert "No discrepancies found." not in text
     assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2  # both logos
@@ -1025,7 +1025,7 @@ def test_rebate_report_pdf(demo_con):
     name, data = reports.rebate_report_pdf(demo_con, TW_KEY, 2026, [3])
     assert name == "Rebate Report_Transworld Packaging (BD) Ltd_Q3_2026.pdf"
     text = pdf_text(data)
-    assert "Rebate Report (Transworld Packaging (BD) Ltd.)" in text
+    assert "Rebate statement" in text and "Transworld Packaging (BD) Ltd." in text
     assert "Standard Carton" in text and "Custom Carton" in text
     assert "PACD Rebate" in text and "Matalan Rebate" in text
 
@@ -1049,7 +1049,7 @@ def test_rebate_report_with_so_only_drops_rows_without_an_ebiz_so(xref_con):
     assert name == "Rebate Report (with SO#)_Pack A Ltd_Q3_2026.pdf"
     text = pdf_text(data)
     assert "260" in text and "267" not in text
-    assert "Rebate Report with eBiz SO# (Pack A Ltd.)" in text  # a printed copy says which type it is
+    assert "Rows with eBiz SO#" in text  # a printed copy says which type it is
 
 
 def test_full_tracker_xlsx_matches_the_pdf(demo_con):
@@ -1227,7 +1227,7 @@ def test_discrepancy_pdf_section_bar_never_ends_a_page(tmp_path):
                 "rows": {"STD": full["rows"]["STD"][:n] + full["rows"]["STD"][-1:], "CUS": []}}
         _, data = reports.discrepancy_pdf(con, "PACK", xref)
         for page in pypdf.PdfReader(BytesIO(data)).pages:
-            above_footer = page.extract_text().splitlines()[-2]  # the last line is "Page x of y"
+            above_footer = page.extract_text().splitlines()[-2]  # the last line is "Sheet x of y"
             assert above_footer not in DISCREPANCY_TITLES, (n, above_footer)
 
 
@@ -1414,3 +1414,25 @@ def test_ebiz_page_deletes_only_after_confirming(xref_con):
     assert not at.exception
     assert core.ebiz_row_count(xref_con) == before - 1
     assert "ebiz_delete_pending" not in at.session_state
+
+
+def test_statement_pdf_layout(demo_con):
+    name, data = reports.rebate_report_pdf(demo_con, TW_KEY, 2026, [3])
+    text = pdf_text(data)
+    for expected in ("Rebate statement", "Transworld Packaging (BD) Ltd.", "Q3 2026 · 1 Jul – 30 Sep 2026",
+                     "All tracker rows", "Cartons shipped", "Total amount", "PACD Rebate", "Matalan Rebate",
+                     "Sheet 1 of", "01 Aug 2026", "Length (mm)"):
+        assert expected in text, expected
+    assert "l_mm" not in reports.PDF_COLS and "w_mm" not in reports.PDF_COLS
+    assert "1,851" not in text  # the first row's L value: the L column is gone from the PDF
+    assert "8/1/2026" not in text
+    assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2
+
+
+def test_statement_pdf_variants(demo_con, xref_con):
+    so_text = pdf_text(reports.rebate_report_pdf(xref_con, "PACK", 2026, [3], so_only=True)[1])
+    assert "Rows with eBiz SO#" in so_text
+    matalan = pdf_text(reports.full_tracker_pdf(demo_con, TW_KEY, 2026, [3], "Matalan")[1])
+    assert "PACD" not in matalan and "Full tracker" in matalan
+    disc = pdf_text(reports.discrepancy_pdf(xref_con, "PACK", core.cross_reference(xref_con, "PACK"))[1])
+    assert "All shipments · eBiz data loaded" in disc and "Discrepancy report" in disc
