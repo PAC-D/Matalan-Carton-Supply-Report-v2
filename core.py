@@ -616,6 +616,12 @@ def _so(text):
     return text if text and text != "0" else None
 
 
+def _so_pair(order_number):
+    """Order Number "A|B" -> ("A", "B"); blank or "0" parts become None."""
+    parts = (order_number or "").split("|")
+    return _so(parts[0]), _so(parts[1]) if len(parts) > 1 else None
+
+
 def _ebiz_value(col, value):
     if value is None:
         return None
@@ -650,9 +656,7 @@ def read_ebiz(src):
         row["vendor_key"] = supplier_key(row["vendor"])
         if row["vendor_key"] is None:  # a total/footer line: no vendor to report it under
             continue
-        parts = (row["order_number"] or "").split("|")
-        row["so_1"] = _so(parts[0])
-        row["so_2"] = _so(parts[1]) if len(parts) > 1 else None
+        row["so_1"], row["so_2"] = _so_pair(row["order_number"])
         rows.append(row)
     return rows
 
@@ -714,6 +718,78 @@ def ebiz_vendors(con):
     """Vendor keys in the eBiz data, sorted."""
     return [r[0] for r in con.execute(
         'SELECT DISTINCT vendor_key COLLATE "C" FROM ebiz WHERE vendor_key IS NOT NULL ORDER BY 1')]
+
+
+def _ebiz_where(vendor):
+    return ("WHERE vendor_key IS NOT DISTINCT FROM %s", [vendor]) if vendor is not None else ("", [])
+
+
+def ebiz_rows(con, vendor=None, limit=None, offset=0):
+    """eBiz rows for the editor (id, EBIZ_COLUMNS, source_file, imported_at), in id order."""
+    where, params = _ebiz_where(vendor)
+    paging = ""
+    if limit is not None:
+        paging = " LIMIT %s OFFSET %s"
+        params += [int(limit), int(offset)]
+    return [dict(r) for r in con.execute(
+        f"SELECT id, {', '.join(EBIZ_COLUMNS)}, source_file, imported_at FROM ebiz {where} ORDER BY id{paging}",
+        params)]
+
+
+def ebiz_row_count(con, vendor=None):
+    where, params = _ebiz_where(vendor)
+    return con.execute(f"SELECT COUNT(*) FROM ebiz {where}", params).fetchone()[0]
+
+
+def update_ebiz_rows(con, edited):
+    """Save edited eBiz rows in one transaction; vendor_key and SO_1/SO_2 are recomputed. Returns rows saved.
+
+    Raises ValueError, saving nothing, for a blank Vendor, a non-numeric figure or an id that no longer exists.
+    """
+    prepared = []
+    for number, item in enumerate(edited, 1):
+        try:
+            row_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            raise ValueError(f"Row {number}: row ID is invalid.") from None
+        values = {}
+        for col, header in EBIZ_HEADERS.items():
+            value = _clean(item.get(col))
+            if value is not None and col in EBIZ_REAL:
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Row {number}: {header} must be a number.") from None
+            elif value is not None:
+                value = _ebiz_value(col, value)
+            values[col] = value
+        values["vendor_key"] = supplier_key(values["vendor"])
+        if values["vendor_key"] is None:
+            raise ValueError(f"Row {number}: Vendor is required.")
+        values["so_1"], values["so_2"] = _so_pair(values["order_number"])
+        prepared.append((row_id, values))
+    cols = list(EBIZ_HEADERS) + ["vendor_key", "so_1", "so_2"]
+    with con.transaction():
+        for number, (row_id, values) in enumerate(prepared, 1):
+            cur = con.execute(f"UPDATE ebiz SET {', '.join(f'{c} = %s' for c in cols)} WHERE id = %s",
+                              [values[c] for c in cols] + [row_id])
+            if not cur.rowcount:
+                raise ValueError(f"Row {number}: row ID {row_id} no longer exists. Refresh the page.")
+        if prepared:
+            _bump_revision(con)
+    return len(prepared)
+
+
+def delete_ebiz_rows(con, ids):
+    """Delete these eBiz row ids; ids already gone are ignored. Returns rows deleted."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0
+    with con.transaction():
+        count = _delete(con, "ebiz", "id = ANY(%s)", (ids,))
+        if count:
+            _bump_revision(con)
+    return count
 
 
 def so_order(so):

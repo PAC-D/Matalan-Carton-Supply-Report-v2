@@ -1375,3 +1375,42 @@ def test_tracker_page_deletes_an_imported_file_only_after_confirming():
     next(b for b in at.button if b.label == "Delete").click().run()
     assert not at.exception
     assert sum(core.editable_row_count(con, k) for k in core.TABLES) == 0
+
+
+def test_ebiz_edit_recomputes_keys_and_keeps_rows_with_a_blank_order(tmp_path):
+    con = core.connect()
+    core.replace_ebiz(con, {"e.xlsx": core.read_ebiz(make_ebiz(tmp_path / "e.xlsx", [erow("7001"), erow("7002")]))})
+    first, second = core.ebiz_rows(con)
+    revision = core.data_revision(con)
+    assert core.update_ebiz_rows(con, [{**first, "vendor": "Other Co", "order_number": "8001|8002"},
+                                       {**second, "order_number": None}]) == 2
+    first, second = core.ebiz_rows(con)
+    assert (first["vendor_key"], first["so_1"], first["so_2"]) == ("OTHER", "8001", "8002")
+    assert (second["so_1"], second["so_2"]) == (None, None)
+    assert core.data_revision(con) != revision
+    with pytest.raises(ValueError, match="Vendor is required"):
+        core.update_ebiz_rows(con, [{**first, "vendor": " "}])
+    assert core.delete_ebiz_rows(con, [second["id"]]) == 1
+    assert [r["id"] for r in core.ebiz_rows(con)] == [first["id"]]
+    assert core.delete_ebiz_rows(con, [second["id"]]) == 0
+
+
+def test_ebiz_data_page(xref_con):
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(HERE / "pages" / "9_Ebiz_Data.py"), default_timeout=60).run()
+    assert not at.exception
+    assert at.selectbox[0].label == "Vendor"
+    assert "Save eBiz changes" in [b.label for b in at.button]
+
+
+def test_ebiz_page_deletes_only_after_confirming(xref_con):
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(HERE / "pages" / "9_Ebiz_Data.py"), default_timeout=60).run()
+    before = core.ebiz_row_count(xref_con)
+    at.session_state["ebiz_delete_pending"] = [core.ebiz_rows(xref_con)[0]["id"]]  # what "Delete N selected" stores
+    at.run()
+    assert core.ebiz_row_count(xref_con) == before
+    next(b for b in at.button if b.label == "Delete").click().run()
+    assert not at.exception
+    assert core.ebiz_row_count(xref_con) == before - 1
+    assert "ebiz_delete_pending" not in at.session_state

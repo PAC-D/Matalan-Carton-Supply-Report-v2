@@ -25,6 +25,8 @@ pages = {
     "Manage": [
         st.Page("pages/3_Tracker.py", title="Tracker data",
                 icon=":material/edit_note:", url_path="tracker"),
+        st.Page("pages/9_Ebiz_Data.py", title="eBiz data",
+                icon=":material/receipt_long:", url_path="ebiz-data"),
         st.Page("pages/4_Rates.py", title="Rates",
                 icon=":material/percent:", url_path="rates"),
         st.Page("pages/5_Import.py", title="Data import",
