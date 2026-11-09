@@ -606,15 +606,25 @@ def _statement(kind, supplier_name, period, row_line, figures, meta):
 
 
 def _period(fiscal_year, quarters):
-    """'Q3 2026 · 1 Jul – 30 Sep 2026' for the selected quarters (Q1 2026 starts 1 Dec 2025)."""
-    qs = sorted(quarters)
-    first, last = qs[0], qs[-1]
-    start = date(2025, 12, 1) if (int(fiscal_year), first) == (2026, 1) else date(fiscal_year, 3 * first - 2, 1)
-    end_month = 3 * last
-    end = (date(fiscal_year + 1, 1, 1) if end_month == 12 else date(fiscal_year, end_month + 1, 1)) - timedelta(1)
-    span = f"Q{first}" if first == last else f"Q{first}–Q{last}"
-    start_text = f"{start.day} {start:%b}" + (f" {start.year}" if start.year != end.year else "")
-    return f"{span} {fiscal_year} · {start_text} – {end.day} {end:%b %Y}"
+    """'Q3 2026 · 1 Jul – 30 Sep 2026' for the selected quarters (Q1 2026 starts 1 Dec 2025).
+
+    Quarters that are not next to each other are listed apart, so a statement never implies a skipped quarter.
+    """
+    runs = []
+    for q in sorted({int(q) for q in quarters}):
+        if runs and q == runs[-1][1] + 1:
+            runs[-1][1] = q
+        else:
+            runs.append([q, q])
+    spans, dates = [], []
+    for first, last in runs:
+        start = date(2025, 12, 1) if (int(fiscal_year), first) == (2026, 1) else date(fiscal_year, 3 * first - 2, 1)
+        end_month = 3 * last
+        end = (date(fiscal_year + 1, 1, 1) if end_month == 12 else date(fiscal_year, end_month + 1, 1)) - timedelta(1)
+        spans.append(f"Q{first}" if first == last else f"Q{first}–Q{last}")
+        dates.append(f"{start.day} {start:%b}" + (f" {start.year}" if start.year != end.year else "")
+                     + f" – {end.day} {end:%b %Y}")
+    return f"{' + '.join(spans)} {fiscal_year} · {', '.join(dates)}"
 
 
 class _NumberedCanvas(rl_canvas.Canvas):

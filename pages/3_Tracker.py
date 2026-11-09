@@ -148,7 +148,8 @@ def main():
     st.caption(f"Editing rows {first:,}–{last:,} of {count:,} in {core.SHEETS[kind]} for "
                f"{core.supplier_name(con, supplier)}. "
                "Dates accept YYYY-MM-DD or DD/MM/YYYY. Changes are saved together.")
-    edited = st.data_editor(frame, key=f"tracker_editor_{kind}_{supplier}_{selected_page}", hide_index=True,
+    revision = core.data_revision(con)  # ticks and edits are kept by row position: reset them when rows change
+    edited = st.data_editor(frame, key=f"tracker_editor_{kind}_{supplier}_{selected_page}_{revision}", hide_index=True,
                             num_rows="fixed", height=560, column_config=config)
     delete_tools(con, kind, supplier, names[supplier], edited)
     if st.button("Save tracker changes", type="primary", icon=":material/save:"):

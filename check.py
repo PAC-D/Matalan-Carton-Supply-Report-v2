@@ -1451,3 +1451,20 @@ def test_excel_twins_have_the_statement_header_and_keep_l_and_w(demo_con, xref_c
     _, disc = reports.discrepancy_xlsx(xref_con, "PACK", core.cross_reference(xref_con, "PACK"))
     first = [c for r in openpyxl.load_workbook(BytesIO(disc)).worksheets[0].iter_rows(values_only=True) for c in r]
     assert "Discrepancy report" in first and "Pack A Ltd." in first
+
+
+def test_editors_reset_when_the_data_changes():
+    # st.data_editor keeps ticks and edits by row position; after a delete (here or in another tab) the same
+    # positions hold other rows, so the editor key must change with the data revision.
+    for page in ("3_Tracker.py", "9_Ebiz_Data.py"):
+        text = (HERE / "pages" / page).read_text(encoding="utf-8")
+        key = re.search(r"st\.data_editor\(frame, key=f\"([^\"]+)\"", text).group(1)
+        assert "{revision}" in key, page
+        assert "revision = core.data_revision(con)" in text, page
+
+
+def test_statement_period_shows_gaps_between_quarters():
+    assert reports._period(2026, [3]) == "Q3 2026 · 1 Jul – 30 Sep 2026"
+    assert reports._period(2026, [1, 2]) == "Q1–Q2 2026 · 1 Dec 2025 – 30 Jun 2026"
+    assert reports._period(2026, [1, 3]) == "Q1 + Q3 2026 · 1 Dec 2025 – 31 Mar 2026, 1 Jul – 30 Sep 2026"
+    assert reports._period(2027, [1, 2, 4]) == "Q1–Q2 + Q4 2027 · 1 Jan – 30 Jun 2027, 1 Oct – 31 Dec 2027"
