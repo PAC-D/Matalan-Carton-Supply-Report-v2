@@ -717,6 +717,21 @@ def _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, fil
             filename.format(brand=brand, name=safe_name(name), span=span, year=fiscal_year))
 
 
+def _full_tracker_parts(con, supplier, fiscal_year, quarters, brand, excel=False):
+    """Full Tracker parts with Matalan-only exclusions, leaving every other report untouched."""
+    report_name, filename = FULL_TRACKER
+    parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename,
+                           so_only=excel and brand == "Matalan")
+    if not parts or brand != "Matalan" or supplier not in core.ebiz_vendors(con):
+        return parts
+    cols, blocks, title, base_name = parts
+    missing = {order["so"] for order in core.cross_reference(con, supplier)["orders"]
+               if order["status"] == "Not in eBiz"}
+    blocks = [(label, [row for row in rows if core._so(row["ebiz_so"]) not in missing])
+              for label, rows in blocks]
+    return (cols, blocks, title, base_name) if any(rows for _, rows in blocks) else None
+
+
 def _statement_figures(rows, cols):
     """(label, value) pairs for the statement: cartons, total amount and each rebate column the report shows."""
     pacd, matalan = core.rate_headers(rows)
@@ -758,8 +773,7 @@ def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filen
 
 def _full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
     """Full Tracker PDF ordered by quarter, then Standard, Custom and the quarter total."""
-    report_name, filename = FULL_TRACKER
-    parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename, False)
+    parts = _full_tracker_parts(con, supplier, fiscal_year, quarters, brand)
     if not parts:
         return None
     cols, blocks, title, base_name = parts
@@ -925,10 +939,8 @@ def _full_tracker_sheet(ws, supplier_name, fiscal_year, quarters, cols, blocks, 
 
 def _full_tracker_xlsx(con, supplier, fiscal_year, quarters, brand):
     """Full Tracker workbook with one sheet per populated quarter and a final Total sheet."""
-    report_name, filename = FULL_TRACKER
-    # Matalan's Excel export contains only rows that have a non-zero eBiz Sales Order number.
-    parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename,
-                           so_only=brand == "Matalan")
+    # Matalan Excel also retains its existing blank/zero SO exclusion.
+    parts = _full_tracker_parts(con, supplier, fiscal_year, quarters, brand, excel=True)
     if not parts:
         return None
     cols, blocks, _title, base_name = parts

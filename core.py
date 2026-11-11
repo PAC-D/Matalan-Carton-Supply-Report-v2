@@ -687,7 +687,7 @@ def ebiz_clashes(files):
 
 
 def replace_ebiz(con, files):
-    """Delete every eBiz row, then insert the files' rows, in one transaction. Returns {file: rows inserted}.
+    """Replace only the uploaded vendors' eBiz rows in one transaction. Returns {file: rows inserted}.
 
     Raises ValueError, and changes nothing, when two files share a vendor key.
     """
@@ -696,12 +696,15 @@ def replace_ebiz(con, files):
         raise ValueError("Files overlap: " + "; ".join(f"{c['Vendor']} in {c['Files']}" for c in clash))
     now = datetime.now().isoformat(timespec="seconds")
     cols = EBIZ_COLUMNS + ["source_file", "imported_at"]
+    vendors = sorted({row["vendor_key"] for rows in files.values() for row in rows})
     with con.transaction():
-        con.execute("DELETE FROM ebiz")
+        if vendors:
+            con.execute("DELETE FROM ebiz WHERE vendor_key = ANY(%s)", (vendors,))
         for name, rows in files.items():
             con.cursor().executemany(f"INSERT INTO ebiz ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
                             [[r[c] for c in EBIZ_COLUMNS] + [name, now] for r in rows])
-        _bump_revision(con)
+        if vendors:
+            _bump_revision(con)
     return {name: len(rows) for name, rows in files.items()}
 
 

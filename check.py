@@ -943,7 +943,7 @@ def test_ebiz_preview(tmp_path):
         "Qty Shipped": 15.0, "Total Rebate": 1.75}]
 
 
-def test_ebiz_upload_replaces_all_ebiz_data(tmp_path):
+def test_ebiz_upload_replaces_only_uploaded_vendors(tmp_path):
     con = core.connect()
     assert core.ebiz_status(con) is None
     a = {"a.xlsx": core.read_ebiz(make_ebiz(tmp_path / "a.xlsx", [erow("1"), erow("2", vendor="Other Co")]))}
@@ -951,14 +951,15 @@ def test_ebiz_upload_replaces_all_ebiz_data(tmp_path):
     assert core.ebiz_vendors(con) == ["OTHER", "PACK"]
     b = {"b.xlsx": core.read_ebiz(make_ebiz(tmp_path / "b.xlsx", [erow("3")]))}
     core.replace_ebiz(con, b)
-    assert [r[0] for r in con.execute("SELECT order_number FROM ebiz")] == ["3"]
+    assert [tuple(r) for r in con.execute(
+        "SELECT vendor_key, order_number FROM ebiz ORDER BY vendor_key")] == [("OTHER", "2"), ("PACK", "3")]
     count, files, imported_at = core.ebiz_status(con)
-    assert (count, files) == (1, ["b.xlsx"]) and imported_at
+    assert (count, files) == (2, ["a.xlsx", "b.xlsx"]) and imported_at
     clash = {"c.xlsx": b["b.xlsx"], "d.xlsx": b["b.xlsx"]}
     assert core.ebiz_clashes(clash) == [{"Vendor": "PACK", "Files": "c.xlsx / d.xlsx"}]
     with pytest.raises(ValueError, match="PACK"):
         core.replace_ebiz(con, clash)
-    assert core.ebiz_status(con)[0] == 1  # a refused upload keeps the old data
+    assert core.ebiz_status(con)[0] == 2  # a refused upload keeps both vendors' old data
 
 
 
@@ -1088,6 +1089,22 @@ def test_full_tracker_xlsx_matches_the_pdf(demo_con):
                    for r in core.rows(demo_con, kind, supplier=TW_KEY) if core._so(r["ebiz_so"]))
     assert xlsx_total(matalan, "Tracker Grand Total", "Total") == expected
     assert reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [1], "PacD") is None
+
+
+def test_matalan_full_tracker_excludes_orders_not_found_in_ebiz(xref_con):
+    _, pdf = reports.full_tracker_pdf(xref_con, "PACK", 2026, [3], "Matalan")
+    text = pdf_text(pdf)
+    assert "1004" not in text
+    assert "1001" in text and "1002" in text and "1003" in text
+
+    _, xlsx = reports.full_tracker_xlsx(xref_con, "PACK", 2026, [3], "Matalan")
+    assert xlsx_total(xlsx, "Tracker Grand Total", "Total") == 250
+
+    # PacD Full Tracker and the Rebate Report keep their existing rows.
+    _, pacd = reports.full_tracker_xlsx(xref_con, "PACK", 2026, [3], "PacD")
+    assert xlsx_total(pacd, "Tracker Grand Total", "Total") == 267
+    _, rebate = reports.rebate_report_xlsx(xref_con, "PACK", 2026, [3])
+    assert xlsx_total(rebate, "Tracker Grand Total") == 267
 
 
 def test_discrepancy_xlsx(xref_con):
@@ -1303,7 +1320,7 @@ def test_build_all_adds_discrepancy_files_for_suppliers_with_ebiz(demo_con, tmp_
         f"August/{p}" for p in [SUMMARY] + TW_FILES + disc)
 
 
-def test_app_replaces_ebiz_data(tmp_path, monkeypatch):
+def test_app_updates_ebiz_data(tmp_path, monkeypatch):
     import streamlit as st
     from streamlit.testing.v1 import AppTest
     core.save_many(core.connect(), {DEMO.name: core.read_workbook(DEMO)})
@@ -1313,7 +1330,7 @@ def test_app_replaces_ebiz_data(tmp_path, monkeypatch):
     at = AppTest.from_file(str(HERE / "pages" / "5_Import.py"), default_timeout=30).run()
     assert not at.exception
     assert any("NOBODY" in w.value for w in at.warning)  # vendor without tracker rows
-    next(b for b in at.button if b.label == "Replace all eBiz data").click().run()
+    next(b for b in at.button if b.label == "Update eBiz data").click().run()
     assert not at.exception
     assert core.ebiz_status(core.connect())[0] == 2
     report = AppTest.from_file(str(HERE / "pages" / "2_Reports.py"), default_timeout=30).run()
@@ -1322,7 +1339,7 @@ def test_app_replaces_ebiz_data(tmp_path, monkeypatch):
     assert not any("current eBiz data will be removed" in w.value for w in at.warning)
 
 
-def test_app_warns_which_vendors_a_replace_drops(tmp_path, monkeypatch):
+def test_app_preserves_vendors_not_in_the_upload(tmp_path, monkeypatch):
     import streamlit as st
     from streamlit.testing.v1 import AppTest
     con = core.connect()
@@ -1335,7 +1352,12 @@ def test_app_warns_which_vendors_a_replace_drops(tmp_path, monkeypatch):
                         lambda *a, **k: [FakeUpload(path)] if k.get("key") == "ebiz_upload" else [])
     at = AppTest.from_file(str(HERE / "pages" / "5_Import.py"), default_timeout=30).run()
     assert not at.exception
-    assert "Current eBiz data will be removed for: NOBODY, OTHER." in [w.value for w in at.warning]
+    assert not any("will be removed" in warning.value for warning in at.warning)
+    next(b for b in at.button if b.label == "Update eBiz data").click().run()
+    assert not at.exception
+    saved = [tuple(row) for row in core.connect().execute(
+        "SELECT vendor_key, order_number FROM ebiz ORDER BY vendor_key")]
+    assert saved == [("NOBODY", "1"), ("OTHER", "1"), (TW_KEY, "2")]
 
 
 def test_docker_build_replaces_the_streamlit_tab_title():

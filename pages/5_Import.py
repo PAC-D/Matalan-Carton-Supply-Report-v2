@@ -125,7 +125,7 @@ def ebiz_import(con):
             st.caption(f"Current data: {status[0]:,} rows from {len(status[1])} file(s), loaded "
                        f"{status[2].replace('T', ' ')[:16]}.")
         else:
-            st.caption("No eBiz data yet. Upload every vendor together; replacement is all-or-nothing.")
+            st.caption("No eBiz data yet. Upload one or more vendor exports.")
         uploads = st.file_uploader("eBiz exports", type=["xlsx", "xlsm"],
                                    accept_multiple_files=True, key="ebiz_upload",
                                    label_visibility="collapsed")
@@ -137,15 +137,12 @@ def ebiz_import(con):
         unknown = sorted(uploaded - set(core.suppliers(con)), key=str)
         if unknown:
             st.warning(f"No tracker rows exist for: {', '.join(map(str, unknown))}.")
-        dropped = sorted(set(core.ebiz_vendors(con)) - uploaded)
-        if dropped:
-            st.warning(f"Current eBiz data will be removed for: {', '.join(dropped)}.")
         clash = core.ebiz_clashes(files)
         if clash:
             st.error("These files contain the same vendor. Remove one file.")
             st.dataframe(pd.DataFrame(clash), hide_index=True)
-        st.caption(f"Replacement deletes all {status[0] if status else 0:,} current eBiz rows first.")
-        if st.button("Replace all eBiz data", type="primary", disabled=bool(clash),
+        st.caption("Only the uploaded vendors will be replaced. All other vendors will be kept unchanged.")
+        if st.button("Update eBiz data", type="primary", disabled=bool(clash),
                      icon=":material/sync:"):
             try:
                 with st.spinner("Replacing eBiz data…"):
@@ -156,7 +153,7 @@ def ebiz_import(con):
             else:
                 clear_built_reports()
                 st.session_state["import_flash"] = (
-                    f"Replacement finished: {total:,} eBiz rows are saved.")
+                    f"Update finished: {total:,} uploaded eBiz rows are saved.")
                 st.rerun()
 
 

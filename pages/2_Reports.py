@@ -9,7 +9,7 @@ from web_ui import header, page
 
 REPORTS_DIR = Path(os.environ.get(
     "REPORTS_DIR", Path(__file__).resolve().parents[1] / "Reports"))
-REPORT_CACHE_VERSION = "built-reports-v2"
+REPORT_CACHE_VERSION = "built-reports-v3"
 
 
 @st.fragment
