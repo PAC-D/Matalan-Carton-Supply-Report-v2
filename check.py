@@ -1569,7 +1569,7 @@ def test_calculation_follows_the_tracker_formulas():
 
 
 def test_fill_row_fills_blanks_and_flags_differences():
-    row = dict.fromkeys(core.COLUMNS) | {"carton_selection": "A1", "shipment_date": "2026-08-01", "carton_qty": 10,
+    row = dict.fromkeys(core.COLUMNS) | {"carton_selection": "A1", "shipment_date": "2026-10-01", "carton_qty": 10,
                                          "unit_price": 2.0}
     found = core.fill_row("STD", row, _prices())
     assert row["length_mm"] == 495 and row["area_sqm"] == pytest.approx(1.011724)
@@ -1580,13 +1580,21 @@ def test_fill_row_fills_blanks_and_flags_differences():
     assert core.fill_row("STD", row, _prices()) == []
     blank = dict.fromkeys(core.COLUMNS) | {"carton_selection": "Custom Carton", "carton_qty": 1}
     assert ("l_mm", None, None) in core.fill_row("CUS", blank, _prices())
+    # Up to Q3 2026 saved values stay as they are: blanks are filled, nothing is flagged.
+    old = dict.fromkeys(core.COLUMNS) | {"carton_selection": "A1", "shipment_date": "2026-09-30", "carton_qty": 10,
+                                         "unit_price": 2.0, "height_mm": 999}
+    assert core.fill_row("STD", old, _prices()) == []
+    assert (old["unit_price"], old["height_mm"], old["length_mm"], old["total_amount"]) == (2.0, 999, 495, 20.0)
 
 
 def test_import_fills_saved_rows_and_lists_differences():
     con = core.connect()
-    insert(con, "STD", shipment_date="2026-08-01", packaging_supplier="Calc Ltd", supplier_key="CALC",
+    insert(con, "STD", shipment_date="2026-10-02", packaging_supplier="Calc Ltd", supplier_key="CALC",
            carton_selection="B1", carton_qty=4, unit_price=5.0)
-    assert core.fill_saved(con) == 1
+    insert(con, "STD", shipment_date="2026-08-01", packaging_supplier="Old Ltd", supplier_key="OLD",
+           carton_selection="B1", carton_qty=4, unit_price=5.0)
+    assert core.fill_saved(con) == 2
+    assert not [i for i in core.saved_calc_issues(con) if i["Packaging supplier"] == "Old Ltd"]
     row = core.rows(con, "STD", supplier="CALC")[0]
     assert (row["l_mm"], row["final_price"], row["total_amount"]) == (1771, 5.0, 20.0)
     issues = [i for i in core.saved_calc_issues(con) if i["Packaging supplier"] == "Calc Ltd"]

@@ -87,6 +87,8 @@ BLANK = {"STD": (11, -16, 1.0), "CUS": (15, -10, 1.025)}
 CALC_COLS = ["length_mm", "width_mm", "height_mm", "l_mm", "w_mm", "area_sqm",
              "unit_price", "final_price", "total_amount"]
 CALC_TOLERANCE = 0.01  # a saved value this close to the calculation is a match (rounding)
+# Shipments before this date (up to Q3 2026) keep their values: blanks are filled, nothing is flagged.
+CHECK_FROM = "2026-10-01"
 # (carton type, Carton Selection, from, USD price, per "carton" or "sqm"), from the RFQ sheet of the tracker.
 SEED_PRICES = [("STD", sel, "2025-12-01", price, "carton") for sel, price in zip(
     SIZES["STD"], [0.97, 0.88, 0.81, 1.10, 0.99, 0.90, 1.22, 1.10, 1.02, 1.39, 1.27, 1.18])] + [
@@ -1044,6 +1046,7 @@ def fill_row(kind, row, prices):
 
     Returns [(column, saved value, calculated value)] for saved values that differ from the calculation by more
     than CALC_TOLERANCE, and for cells left blank because they can't be calculated (both values None).
+    Rows shipped before CHECK_FROM are only filled, never listed.
     """
     calc = calculate(kind, row, prices)
     found = []
@@ -1054,7 +1057,7 @@ def fill_row(kind, row, prices):
                 found.append((col, None, None))
         elif calc[col] is not None and abs(row[col] - calc[col]) > CALC_TOLERANCE:
             found.append((col, row[col], calc[col]))
-    return found
+    return [] if (row.get("shipment_date") or "9999") < CHECK_FROM else found
 
 
 def _calc_issue(kind, row, col, saved, calc, **where):
