@@ -33,12 +33,14 @@ HEADERS = {
     "l_mm": "L",
     "w_mm": "W",
     "area_sqm": "Area(sqm)",
-    "unit_price": "Carton's Unit Price (CNY,EXW w/VAT)",
-    "final_price": "Final Price, CNY/CTN",
+    "unit_price": "Carton's Unit Price (USD,EXW w/VAT)",
+    "final_price": "Final Price, USD/CTN",
     "total_amount": "Total Amount",
     "note": "NOTE",
 }
 COLUMNS = list(HEADERS)
+# Supplier workbooks still label the prices CNY although they are USD; import accepts both spellings.
+OLD_HEADERS = {"unit_price": "Carton's Unit Price (CNY,EXW w/VAT)", "final_price": "Final Price, CNY/CTN"}
 DATE_COLS = {"po_received_date", "shipment_date"}
 INT_COLS = {"carton_qty"}
 REAL_COLS = {"length_mm", "width_mm", "height_mm", "l_mm", "w_mm", "area_sqm",
@@ -71,6 +73,25 @@ SEED_RATES = [
     ("STD", "2026-07-01", 0.04, 0.05),
     ("CUS", "2026-07-01", 0.075, 0.05),
 ]
+
+# Carton Selection -> (Length, Width, Height) in mm, as the tracker workbook's formulas fill them.
+# Ratio cartons have a fixed footprint; their Height is typed per row. "Custom" sizes are always typed.
+SIZES = {
+    "STD": {f"{letter}{n}": (495 if letter == "A" else 595, {"C": 325, "D": 380}.get(letter, 285),
+                             {1: 375, 2: 310}.get(n, 260)) for letter in "ABCD" for n in (1, 2, 3)},
+    "CUS": {"R-FPA": (495, 285, None), "R-FPB": (595, 285, None),
+            "R-FPC": (595, 325, None), "R-FPD": (595, 380, None)},
+}
+# Blank size: L = (Length + Width) * 2 + a, W = Width + Height + b; Area = L * W * factor / 1e6.
+BLANK = {"STD": (11, -16, 1.0), "CUS": (15, -10, 1.025)}
+CALC_COLS = ["length_mm", "width_mm", "height_mm", "l_mm", "w_mm", "area_sqm",
+             "unit_price", "final_price", "total_amount"]
+CALC_TOLERANCE = 0.01  # a saved value this close to the calculation is a match (rounding)
+# (carton type, Carton Selection, from, USD price, per "carton" or "sqm"), from the RFQ sheet of the tracker.
+SEED_PRICES = [("STD", sel, "2025-12-01", price, "carton") for sel, price in zip(
+    SIZES["STD"], [0.97, 0.88, 0.81, 1.10, 0.99, 0.90, 1.22, 1.10, 1.02, 1.39, 1.27, 1.18])] + [
+    ("STD", "Custom", "2025-12-01", 0.96, "sqm")] + [
+    ("CUS", sel, "2025-12-01", 1.03, "sqm") for sel in [*SIZES["CUS"], "Custom Carton"]]
 
 VIEW_SQL = """
 CREATE OR REPLACE VIEW {view} AS
@@ -105,6 +126,14 @@ def _schema():
   pacd_pct DOUBLE PRECISION NOT NULL,
   matalan_pct DOUBLE PRECISION NOT NULL,
   PRIMARY KEY (carton_type, effective_from)
+);""")
+    sql.append("""CREATE TABLE IF NOT EXISTS carton_prices (
+  carton_type TEXT NOT NULL CHECK (carton_type IN ('STD', 'CUS')),
+  carton_selection TEXT NOT NULL,
+  effective_from TEXT NOT NULL,
+  price DOUBLE PRECISION NOT NULL,
+  per TEXT NOT NULL CHECK (per IN ('carton', 'sqm')),
+  PRIMARY KEY (carton_type, carton_selection, effective_from)
 );""")
     sql.append("""CREATE TABLE IF NOT EXISTS date_fixes (
   row_key TEXT PRIMARY KEY,
@@ -177,6 +206,9 @@ def connect(url=None):
             con.execute("INSERT INTO data_revision VALUES (1, 0) ON CONFLICT (singleton) DO NOTHING")
             if not con.execute("SELECT 1 FROM rates LIMIT 1").fetchone():
                 con.cursor().executemany("INSERT INTO rates VALUES (%s, %s, %s, %s)", SEED_RATES)
+            if not con.execute("SELECT 1 FROM carton_prices LIMIT 1").fetchone():
+                con.cursor().executemany("INSERT INTO carton_prices VALUES (%s, %s, %s, %s, %s)", SEED_PRICES)
+        fill_saved(con)  # rows saved before the calculation existed get their blank cells filled
         _ready.add(url)
     return con
 
@@ -363,7 +395,7 @@ def _find_columns(sheet, ws):
     found, n = _header_row(ws, HEADERS["shipment_date"], f"{sheet}:")
     index = {}
     for col in COLUMNS:
-        index[col] = found.get(_norm(HEADERS[col]))
+        index[col] = found.get(_norm(HEADERS[col]), found.get(_norm(OLD_HEADERS.get(col, HEADERS[col]))))
         if index[col] is None and col == "unit_price":
             index[col] = next((i for h, i in found.items() if h.startswith("carton's unit price")), None)
         if index[col] is None:
@@ -592,11 +624,14 @@ def save_many(con, files):
             f"{c['Sheet']} {c['Supplier']} {c['Shipment month']} in {c['Files']}" for c in clash))
     now = datetime.now().isoformat(timespec="seconds")
     cols = COLUMNS + ["supplier_key", "source_file", "imported_at"]
+    prices = get_prices(con)
     with con.transaction():
         cur = con.cursor()
         for name, data in files.items():
             for kind, rows in data.items():
                 table = TABLES[kind]
+                for r in rows:
+                    fill_row(kind, r, prices)
                 for key in {(r["supplier_key"], _month(r)) for r in rows}:
                     con.execute(f"DELETE FROM {table} WHERE {_SAME_KEY}", key)
                 cur.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
@@ -926,6 +961,150 @@ def save_rates(con, rates):
         _bump_revision(con)
 
 
+def get_prices(con):
+    """All carton prices, STD first, then by Carton Selection and date."""
+    return [dict(r) for r in con.execute(
+        "SELECT carton_type, carton_selection, effective_from, price, per FROM carton_prices "
+        "ORDER BY carton_type DESC, carton_selection, effective_from")]
+
+
+def save_prices(con, prices):
+    """Replace every carton price, then fill saved tracker cells that are blank and can now be calculated.
+
+    Raises ValueError, and saves nothing, if a row is invalid. Returns how many tracker rows were filled.
+    """
+    rows, seen = [], set()
+    for i, p in enumerate(prices, 1):
+        kind, sel = p.get("carton_type"), str(p.get("carton_selection") or "").strip()
+        if kind not in TABLES:
+            raise ValueError(f"Row {i}: carton type must be STD or CUS.")
+        if not sel:
+            raise ValueError(f"Row {i}: Carton Selection is empty.")
+        try:
+            start = date.fromisoformat(str(p.get("effective_from"))).isoformat()
+        except ValueError:
+            raise ValueError(f"Row {i}: 'From' must be a date (YYYY-MM-DD).") from None
+        price = p.get("price")
+        if not isinstance(price, (int, float)) or not price > 0:
+            raise ValueError(f"Row {i}: price must be more than 0.")
+        if p.get("per") not in ("carton", "sqm"):
+            raise ValueError(f"Row {i}: 'Per' must be carton or sqm.")
+        if (kind, sel.casefold(), start) in seen:
+            raise ValueError(f"Row {i}: duplicate {kind} {sel} price for {start}.")
+        seen.add((kind, sel.casefold(), start))
+        rows.append((kind, sel, start, float(price), p["per"]))
+    with con.transaction():
+        con.execute("DELETE FROM carton_prices")
+        con.cursor().executemany("INSERT INTO carton_prices VALUES (%s, %s, %s, %s, %s)", rows)
+        _bump_revision(con)
+    return fill_saved(con)
+
+
+def _price(prices, kind, selection, shipment_date):
+    """The price row in effect on the shipment date for this carton type and selection, or None."""
+    found = [p for p in prices if p["carton_type"] == kind and p["carton_selection"].casefold() == selection.casefold()
+             and shipment_date and p["effective_from"] <= shipment_date]
+    return max(found, key=lambda p: p["effective_from"], default=None)
+
+
+def calculate(kind, row, prices):
+    """CALC_COLS of one tracker row by the tracker workbook's formulas; None where it can't be calculated.
+
+    Like the workbook, each step reads the row's own earlier value when it has one, else the calculated value.
+    """
+    selection = str(row.get("carton_selection") or "").strip()
+    size = next((v for k, v in SIZES[kind].items() if k.casefold() == selection.casefold()), (None, None, None))
+    out = dict.fromkeys(CALC_COLS)
+    out.update(zip(CALC_COLS[:3], size))
+
+    def value(col):
+        return row[col] if row.get(col) is not None else out[col]
+
+    a, b, factor = BLANK[kind]
+    length, width, height = value("length_mm"), value("width_mm"), value("height_mm")
+    if length and width:
+        out["l_mm"] = (length + width) * 2 + a
+    if width and height:
+        out["w_mm"] = width + height + b
+    if value("l_mm") and value("w_mm"):
+        out["area_sqm"] = value("l_mm") * value("w_mm") * factor / 1_000_000
+    price = _price(prices, kind, selection, row.get("shipment_date"))
+    if price and price["per"] == "carton":
+        out["unit_price"] = price["price"]
+    elif price and value("area_sqm"):
+        out["unit_price"] = value("area_sqm") * price["price"]
+    out["final_price"] = value("unit_price")
+    if row.get("carton_qty") is not None and value("final_price") is not None:
+        out["total_amount"] = row["carton_qty"] * value("final_price")
+    return out
+
+
+def fill_row(kind, row, prices):
+    """Fill the row's blank CALC_COLS in place with the calculation.
+
+    Returns [(column, saved value, calculated value)] for saved values that differ from the calculation by more
+    than CALC_TOLERANCE, and for cells left blank because they can't be calculated (both values None).
+    """
+    calc = calculate(kind, row, prices)
+    found = []
+    for col in CALC_COLS:
+        if row.get(col) is None:
+            row[col] = calc[col]
+            if calc[col] is None:
+                found.append((col, None, None))
+        elif calc[col] is not None and abs(row[col] - calc[col]) > CALC_TOLERANCE:
+            found.append((col, row[col], calc[col]))
+    return found
+
+
+def _calc_issue(kind, row, col, saved, calc, **where):
+    return {**where, "Sheet": SHEETS[kind], "Packaging supplier": row["packaging_supplier"],
+            "eBiz Sales Order #": row["ebiz_so"], "Carton Selection": row["carton_selection"],
+            "Column": HEADERS[col], "Value": saved, "Calculated": calc,
+            "Problem": "Can't calculate" if calc is None else "Differs from calculation"}
+
+
+def calc_check(con, files):
+    """Fill blank calculated cells of uploaded rows in place; list the cells that differ or stay blank."""
+    prices, issues = get_prices(con), []
+    for name, data in files.items():
+        for kind, rows in data.items():
+            for r in rows:
+                issues += [_calc_issue(kind, r, *found, File=name, **{"Excel row": r["_row"]})
+                           for found in fill_row(kind, r, prices)]
+    return issues
+
+
+def _saved_rows(con):
+    for kind, table in TABLES.items():
+        for r in con.execute(f"SELECT id, {', '.join(COLUMNS)} FROM {table} ORDER BY id"):
+            yield kind, table, dict(r)
+
+
+def fill_saved(con):
+    """Fill blank calculated cells of the saved tracker rows. Returns how many rows changed."""
+    prices, changed = get_prices(con), 0
+    with con.transaction():
+        for kind, table, row in list(_saved_rows(con)):
+            before = {col: row[col] for col in CALC_COLS}
+            fill_row(kind, row, prices)
+            cols = [col for col in CALC_COLS if row[col] != before[col]]
+            if cols:
+                con.execute(f"UPDATE {table} SET {', '.join(f'{c} = %s' for c in cols)} WHERE id = %s",
+                            [row[c] for c in cols] + [row["id"]])
+                changed += 1
+        if changed:
+            _bump_revision(con)
+    return changed
+
+
+def saved_calc_issues(con):
+    """Saved tracker cells that differ from the calculation or are blank because they can't be calculated."""
+    prices = get_prices(con)
+    return [_calc_issue(kind, row, *found, **{"Row ID": row["id"]})
+            for kind, _table, row in _saved_rows(con) for found in fill_row(kind, row, prices)]
+
+
 CALENDAR_QUARTERS = {1: "Jan-Mar", 2: "Apr-Jun", 3: "Jul-Sep", 4: "Oct-Dec"}
 
 
@@ -1084,7 +1263,7 @@ def update_tracker_rows(con, kind, edited):
     if kind not in TABLES:
         raise ValueError("Carton type must be STD or CUS.")
     table = TABLES[kind]
-    prepared, seen = [], set()
+    prepared, seen, prices = [], set(), get_prices(con)
     for number, item in enumerate(edited, 1):
         try:
             row_id = int(item.get("id"))
@@ -1111,6 +1290,9 @@ def update_tracker_rows(con, kind, edited):
             else:
                 value = str(value)
             values.append(value)
+        row = dict(zip(COLUMNS, values))
+        fill_row(kind, row, prices)
+        values = [row[col] for col in COLUMNS]
         key = supplier_key(values[COLUMNS.index("packaging_supplier")])
         prepared.append(values + [key, row_id])
 

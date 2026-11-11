@@ -748,7 +748,15 @@ def test_full_tracker_pdf_pacd(demo_con):
     assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2  # both logos
 
 
-def test_full_tracker_pdf_matalan_has_no_pacd(demo_con):
+def demo_ebiz(con, tmp_path, key):
+    """Load eBiz rows for every SO# of the supplier, so the Matalan Full Tracker keeps those rows."""
+    sos = {r["ebiz_so"] for kind in core.TABLES for r in core.rows(con, kind, supplier=key) if core._so(r["ebiz_so"])}
+    path = make_ebiz(tmp_path / f"{key}.xlsx", [erow(so, vendor=core.supplier_name(con, key)) for so in sorted(sos)])
+    core.replace_ebiz(con, {path.name: core.read_ebiz(path)})
+
+
+def test_full_tracker_pdf_matalan_has_no_pacd(demo_con, tmp_path):
+    demo_ebiz(demo_con, tmp_path, UG_KEY)
     name, data = reports.full_tracker_pdf(demo_con, UG_KEY, 2026, [1, 2, 3], "Matalan")
     assert name == "Full Tracker Sheet for Matalan_Uniglory Packaging Industries Ltd_Q1-Q3_2026.pdf"
     text = pdf_text(data)
@@ -777,6 +785,10 @@ UG_FILES = [
     "Uniglory Packaging Industries Ltd/Tracker Raw Data_Uniglory Packaging Industries Ltd_Q3_2026.xlsx",
     "Uniglory Packaging Industries Ltd/Matalan Carton Shipment Tracking_NPS_BD Aug-26 to Aug-26 (Uniglory).xlsx",
 ]
+# The demo has no eBiz data, so no Matalan Full Tracker is built; TW_WITH_EBIZ is Transworld with eBiz loaded.
+TW_WITH_EBIZ = TW_FILES
+TW_FILES = [f for f in TW_FILES if "for Matalan" not in f]
+UG_FILES = [f for f in UG_FILES if "for Matalan" not in f]
 
 
 def test_save_all(demo_con, tmp_path):
@@ -867,7 +879,7 @@ def test_app_date_check_imports_and_remembers_suggested_dates(tmp_path, monkeypa
     assert [r[0] for r in con.execute("SELECT po_received_date FROM track_std ORDER BY id")] == ["2025-12-06", None]
     at.run()  # same file still uploaded: the saved correction is used, nothing to review
     assert "1 row(s) used a previously saved date correction." in [i.value for i in at.info]
-    assert not at.warning
+    assert not any("dates that need review" in w.value for w in at.warning)
     assert len(core.saved_dates(con)) == 1
 
 
@@ -1068,7 +1080,8 @@ def test_rebate_report_with_so_only_drops_rows_without_an_ebiz_so(xref_con):
     assert "Rows with eBiz SO#" in text  # a printed copy says which type it is
 
 
-def test_full_tracker_xlsx_matches_the_pdf(demo_con):
+def test_full_tracker_xlsx_matches_the_pdf(demo_con, tmp_path):
+    demo_ebiz(demo_con, tmp_path, TW_KEY)
     name, data = reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [3], "PacD")
     assert name == "Full Tracker Sheet for PacD_Transworld Packaging (BD) Ltd_Q3_2026.xlsx"
     qty = sum(r["carton_qty"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
@@ -1096,9 +1109,18 @@ def test_matalan_full_tracker_excludes_orders_not_found_in_ebiz(xref_con):
     text = pdf_text(pdf)
     assert "1004" not in text
     assert "1001" in text and "1002" in text and "1003" in text
+    pdf_rows = reports._full_tracker_parts(xref_con, "PACK", 2026, [3], "Matalan")[1]
+    assert sum(r["carton_qty"] for _, rows in pdf_rows for r in rows) == 250  # no SO# rows skipped too
 
     _, xlsx = reports.full_tracker_xlsx(xref_con, "PACK", 2026, [3], "Matalan")
     assert xlsx_total(xlsx, "Tracker Grand Total", "Total") == 250
+
+    # A supplier without eBiz data gets no Matalan Full Tracker.
+    insert(xref_con, "STD", shipment_date="2026-08-03", packaging_supplier="Lone Ltd", supplier_key="LONE",
+           ebiz_so="5005", carton_qty=1, unit_price=1.0, total_amount=1.0)
+    assert reports.full_tracker_pdf(xref_con, "LONE", 2026, [3], "Matalan") is None
+    assert reports.full_tracker_xlsx(xref_con, "LONE", 2026, [3], "Matalan") is None
+    assert reports.full_tracker_pdf(xref_con, "LONE", 2026, [3], "PacD") is not None
 
     # PacD Full Tracker and the Rebate Report keep their existing rows.
     _, pacd = reports.full_tracker_xlsx(xref_con, "PACK", 2026, [3], "PacD")
@@ -1310,14 +1332,15 @@ def test_build_all_adds_discrepancy_files_for_suppliers_with_ebiz(demo_con, tmp_
     disc = [f"{folder}/Discrepancy Report_{folder}_{today}.pdf", f"{folder}/Discrepancy Report_{folder}_{today}.xlsx",
             f"{folder}/Cross Reference_{folder}_{today}.xlsx"]
     items = reports.build_all(demo_con, [TW_KEY, UG_KEY], 2026, [3], discrepancy=True)
-    assert [p for p, _ in items] == [SUMMARY] + TW_FILES + disc + UG_FILES  # Uniglory has no eBiz rows
-    assert [p for p, _ in reports.build_all(demo_con, [TW_KEY, UG_KEY], 2026, [3])] == [SUMMARY] + TW_FILES + UG_FILES
+    assert [p for p, _ in items] == [SUMMARY] + TW_WITH_EBIZ + disc + UG_FILES  # Uniglory has no eBiz rows
+    assert [p for p, _ in reports.build_all(demo_con, [TW_KEY, UG_KEY], 2026, [3])] == [
+        SUMMARY] + TW_WITH_EBIZ + UG_FILES
     # all tracker rows are compared, so a supplier with nothing in the chosen quarters still gets them
     assert [p for p, _ in reports.build_all(demo_con, [TW_KEY], 2026, [1], discrepancy=True)] == [SUMMARY] + disc
     root = tmp_path / "Reports"
     paths = reports.save_all(demo_con, [TW_KEY], 2026, [3], root, discrepancy=True)
     assert sorted(p.relative_to(root).as_posix() for p in paths) == sorted(
-        f"August/{p}" for p in [SUMMARY] + TW_FILES + disc)
+        f"August/{p}" for p in [SUMMARY] + TW_WITH_EBIZ + disc)
 
 
 def test_app_updates_ebiz_data(tmp_path, monkeypatch):
@@ -1472,7 +1495,8 @@ def test_statement_pdf_layout(demo_con):
     assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2
 
 
-def test_statement_pdf_variants(demo_con, xref_con):
+def test_statement_pdf_variants(demo_con, xref_con, tmp_path):
+    demo_ebiz(demo_con, tmp_path, TW_KEY)
     so_text = pdf_text(reports.rebate_report_pdf(xref_con, "PACK", 2026, [3], so_only=True)[1])
     assert "Rows with eBiz SO#" in so_text
     matalan = pdf_text(reports.full_tracker_pdf(demo_con, TW_KEY, 2026, [3], "Matalan")[1])
@@ -1518,3 +1542,69 @@ def test_statement_period_shows_gaps_between_quarters():
     assert reports._period(2026, [1, 2]) == "Q1–Q2 2026 · 1 Dec 2025 – 30 Jun 2026"
     assert reports._period(2026, [1, 3]) == "Q1 + Q3 2026 · 1 Dec 2025 – 31 Mar 2026, 1 Jul – 30 Sep 2026"
     assert reports._period(2027, [1, 2, 4]) == "Q1–Q2 + Q4 2027 · 1 Jan – 30 Jun 2027, 1 Oct – 31 Dec 2027"
+
+
+def _prices():
+    return [dict(zip(["carton_type", "carton_selection", "effective_from", "price", "per"], p))
+            for p in core.SEED_PRICES]
+
+
+def test_calculation_follows_the_tracker_formulas():
+    std = core.calculate("STD", {"carton_selection": "D2", "shipment_date": "2026-10-11", "carton_qty": 22}, _prices())
+    assert (std["length_mm"], std["width_mm"], std["height_mm"]) == (595, 380, 310)
+    assert (std["l_mm"], std["w_mm"]) == (1961, 674)  # (L+W)*2+11, (W+H)-16
+    assert std["area_sqm"] == pytest.approx(1.321714)
+    assert std["unit_price"] == std["final_price"] == 1.27 and std["total_amount"] == pytest.approx(27.94)
+    custom = core.calculate("STD", {"carton_selection": "Custom", "shipment_date": "2026-10-11", "carton_qty": 180,
+                                    "length_mm": 595, "width_mm": 380, "height_mm": 260}, _prices())
+    assert custom["unit_price"] == pytest.approx(1.223664 * 0.96)
+    ratio = core.calculate("CUS", {"carton_selection": "R-FPD", "shipment_date": "2026-10-11", "carton_qty": 254,
+                                   "height_mm": 160}, _prices())
+    assert (ratio["l_mm"], ratio["w_mm"]) == (1965, 530)  # (L+W)*2+15, (W+H)-10
+    assert ratio["area_sqm"] == pytest.approx(1965 * 530 * 1.025 / 1e6)
+    assert ratio["unit_price"] == pytest.approx(ratio["area_sqm"] * 1.03)
+    # Nothing to price before the first price, and no size for a Custom Carton without dimensions.
+    assert core.calculate("STD", {"carton_selection": "D2", "shipment_date": "2025-01-01"}, _prices())["unit_price"] is None
+    assert core.calculate("CUS", {"carton_selection": "Custom Carton"}, _prices())["l_mm"] is None
+
+
+def test_fill_row_fills_blanks_and_flags_differences():
+    row = dict.fromkeys(core.COLUMNS) | {"carton_selection": "A1", "shipment_date": "2026-08-01", "carton_qty": 10,
+                                         "unit_price": 2.0}
+    found = core.fill_row("STD", row, _prices())
+    assert row["length_mm"] == 495 and row["area_sqm"] == pytest.approx(1.011724)
+    assert row["final_price"] == 2.0 and row["total_amount"] == 20.0  # later steps follow the saved value
+    assert found == [("unit_price", 2.0, 0.97)]
+    row["unit_price"] = 0.975  # within the 0.01 tolerance
+    row["final_price"] = row["total_amount"] = None
+    assert core.fill_row("STD", row, _prices()) == []
+    blank = dict.fromkeys(core.COLUMNS) | {"carton_selection": "Custom Carton", "carton_qty": 1}
+    assert ("l_mm", None, None) in core.fill_row("CUS", blank, _prices())
+
+
+def test_import_fills_saved_rows_and_lists_differences():
+    con = core.connect()
+    insert(con, "STD", shipment_date="2026-08-01", packaging_supplier="Calc Ltd", supplier_key="CALC",
+           carton_selection="B1", carton_qty=4, unit_price=5.0)
+    assert core.fill_saved(con) == 1
+    row = core.rows(con, "STD", supplier="CALC")[0]
+    assert (row["l_mm"], row["final_price"], row["total_amount"]) == (1771, 5.0, 20.0)
+    issues = [i for i in core.saved_calc_issues(con) if i["Packaging supplier"] == "Calc Ltd"]
+    assert [(i["Column"], i["Value"], i["Calculated"]) for i in issues] == [(core.HEADERS["unit_price"], 5.0, 1.10)]
+    assert core.fill_saved(con) == 0
+
+
+def test_save_prices_validates_and_refills():
+    con = core.connect()
+    with pytest.raises(ValueError, match="price must be more than 0"):
+        core.save_prices(con, [{"carton_type": "STD", "carton_selection": "A1", "effective_from": "2025-12-01",
+                                "price": 0, "per": "carton"}])
+    assert len(core.get_prices(con)) == len(core.SEED_PRICES)
+    core.save_prices(con, _prices())
+
+
+def test_prices_are_usd_and_old_cny_headers_still_import():
+    assert "USD" in core.HEADERS["unit_price"] and "USD" in core.HEADERS["final_price"]
+    assert not any("CNY" in h for h in core.HEADERS.values())
+    data = core.read_workbook(DEMO)  # the sample tracker still has the CNY headers
+    assert any(r["final_price"] is not None for r in data["STD"])
