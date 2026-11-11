@@ -1017,6 +1017,41 @@ def editable_row_count(con, kind, supplier=None, search=None):
     return con.execute(f"SELECT COUNT(*) FROM {TABLES[kind]}{where}", params).fetchone()[0]
 
 
+def editable_rows_all(con, supplier=None, limit=None, offset=0, search=None):
+    """Raw tracker rows from both carton types for the cross-sheet editor search."""
+    selects, params = [], []
+    for kind, table in TABLES.items():
+        clauses, kind_params = [], []
+        if supplier is not None:
+            clauses.append("supplier_key IS NOT DISTINCT FROM %s")
+            kind_params.append(supplier)
+        search_sql, search_params = _editable_search(search)
+        if search_sql:
+            clauses.append(search_sql)
+            kind_params += search_params
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        selects.append(
+            f"SELECT '{kind}' AS carton_type, id, {', '.join(COLUMNS)}, supplier_key, source_file, imported_at "
+            f"FROM {table} {where}")
+        params += kind_params
+    paging = ""
+    if limit is not None:
+        paging = " LIMIT %s OFFSET %s"
+        params += [int(limit), int(offset)]
+    sql = " UNION ALL ".join(selects)
+    return [dict(r) for r in con.execute(
+        f"SELECT * FROM ({sql}) AS tracker_rows "
+        f"ORDER BY shipment_date IS NULL, shipment_date, carton_type, id{paging}", params)]
+
+
+def editable_row_count_all(con, supplier=None, search=None):
+    """Number of raw tracker rows matching a search across both carton types."""
+    total = 0
+    for kind in TABLES:
+        total += editable_row_count(con, kind, supplier, search)
+    return total
+
+
 def _manual_date(value, row_number, label):
     """Validate a date entered in the tracker editor and return ISO text."""
     if value is None or (isinstance(value, str) and not value.strip()):

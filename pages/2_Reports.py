@@ -9,6 +9,7 @@ from web_ui import header, page
 
 REPORTS_DIR = Path(os.environ.get(
     "REPORTS_DIR", Path(__file__).resolve().parents[1] / "Reports"))
+REPORT_CACHE_VERSION = "built-reports-v2"
 
 
 @st.fragment
@@ -41,8 +42,10 @@ def report_controls():
                                 key="report_discrepancy",
                                 help="Compares all tracker rows with eBiz; period filters do not apply.")
 
-    key = (tuple(picked), year, tuple(chosen), with_disc)
-    artifact_key = core.cache_key("built-reports-v1", key, core.data_revision(con))
+    # Keep the builder version in both keys so a code-only report layout change cannot reuse an old
+    # database artifact or an already prepared download from this browser session.
+    key = (tuple(picked), year, tuple(chosen), with_disc, REPORT_CACHE_VERSION)
+    artifact_key = core.cache_key(REPORT_CACHE_VERSION, key, core.data_revision(con))
     if "built_reports" not in st.session_state:
         cached = core.cache_get(con, artifact_key)
         if cached is not None:
@@ -58,7 +61,7 @@ def report_controls():
                 month = reports.month_name(con, picked, year, chosen)
                 cached = (items, reports.to_zip(items),
                           f"Matalan Carton Reports_{month} {year}.zip")
-                core.cache_set(con, artifact_key, "built-reports-v1", cached, max_entries=12)
+                core.cache_set(con, artifact_key, REPORT_CACHE_VERSION, cached, max_entries=12)
             st.session_state["built_reports"] = (key, *cached)
     if save:
         try:

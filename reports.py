@@ -566,6 +566,21 @@ def _block(label, rows, cols, widths):
             Table(data, colWidths=widths, repeatRows=1, style=TableStyle(style))]
 
 
+def _quarter_carton_block(label, rows, cols, widths):
+    """One carton-type table used by the quarter-first Full Tracker PDF."""
+    qty_i = cols.index("carton_qty") + 1
+    data = [[Paragraph("#", HEAD)] + _pdf_headers(rows, cols)]
+    style = _table_style(cols)
+    for sr, row in enumerate(rows, 1):
+        data.append([str(sr)] + [_fmt(col, row[col]) for col in cols])
+    style += _total_style(len(data), qty_i - 1)
+    data.append(_total_line(f"{label} Carton Total", rows, cols))
+    heading = Paragraph(f'{label} carton <font name="Helvetica" color="#8B857C" size="7">'
+                        f'{len(rows):,} shipments</font>', SECTION)
+    return [CondPageBreak(1.2 * inch), heading, Spacer(1, 4),
+            Table(data, colWidths=widths, repeatRows=1, style=TableStyle(style)), Spacer(1, 7)]
+
+
 def _mark(lines, width=None):
     """The shipping-mark box: a 2 pt outline with a 0.75 pt outline 3 pt inside it, as stencilled on export cartons."""
     inner = Table([[line] for line in lines], colWidths=None if width is None else [width - 6],
@@ -741,6 +756,47 @@ def _tracker_pdf(con, supplier, fiscal_year, quarters, brand, report_name, filen
     return f"{base_name}.pdf", _pdf(story, title, f"{kind} · {name} · {period.split(' · ')[0]}")
 
 
+def _full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
+    """Full Tracker PDF ordered by quarter, then Standard, Custom and the quarter total."""
+    report_name, filename = FULL_TRACKER
+    parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename, False)
+    if not parts:
+        return None
+    cols, blocks, title, base_name = parts
+    cols = [col for col in cols if col in PDF_COLS]
+    all_rows = [row for _, rows in blocks for row in rows]
+    name = core.supplier_name(con, supplier)
+    period = _period(fiscal_year, quarters)
+    counts = " · ".join(f"{label} carton {len(rows):,} rows" for label, rows in blocks)
+    avail = PAGE[0] - 2 * MARGIN
+    base = [BASE_WIDTHS["sr"]] + [BASE_WIDTHS[col] for col in cols]
+    widths = [width * avail / sum(base) for width in base]
+    story = _statement("Full tracker", name, period, f"All tracker rows · {len(all_rows):,} shipments",
+                       _statement_figures(all_rows, cols), counts)
+    quarter_keys = sorted({(row["fiscal_year"], row["quarter"]) for row in all_rows})
+    qty_i = cols.index("carton_qty") + 1
+    for year, quarter in quarter_keys:
+        q_label = core.quarter_label(year, quarter)
+        story += [CondPageBreak(1.5 * inch), Paragraph(q_label, SECTION), Spacer(1, 5)]
+        q_rows = []
+        for label, rows in blocks:
+            carton_rows = [row for row in rows if (row["fiscal_year"], row["quarter"]) == (year, quarter)]
+            if carton_rows:
+                q_rows += carton_rows
+                story += _quarter_carton_block(label, carton_rows, cols, widths)
+        story.append(Table([_total_line(f"{q_label} Total", q_rows, cols)], colWidths=widths,
+                           style=TableStyle(PADDING + _table_style(cols, 0)[3:]
+                                            + _total_style(0, qty_i - 1) + [
+                               ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 6.5),
+                               ("LINEABOVE", (0, 0), (-1, 0), 0.75, INK)])))
+        story.append(Spacer(1, 10))
+    story.append(Table([_total_line("Tracker Grand Total", all_rows, cols)], colWidths=widths,
+                       style=TableStyle(PADDING + _table_style(cols, 0)[3:] + _total_style(0, qty_i - 1) + [
+                           ("FONT", (0, 0), (-1, -1), "Helvetica-Bold", 6.5),
+                           ("LINEABOVE", (0, 0), (-1, 0), 0.75, INK)])))
+    return f"{base_name}.pdf", _pdf(story, title, f"Full tracker · {name} · {period.split(' · ')[0]}")
+
+
 def _xlsx_header(ws, row, headers):
     for i, h in enumerate(headers, 1):
         cell = ws.cell(row, i, h)
@@ -838,17 +894,70 @@ def _tracker_xlsx(con, supplier, fiscal_year, quarters, brand, report_name, file
     return f"{base_name}.xlsx", _bytes(wb)
 
 
+def _full_tracker_sheet(ws, supplier_name, fiscal_year, quarters, cols, blocks, total_label):
+    """Write one detailed Full Tracker worksheet and finish it with a combined total."""
+    all_rows = [item for _, rows in blocks for item in rows]
+    row = _xlsx_statement(ws, "Full tracker", supplier_name, _period(fiscal_year, quarters),
+                          f"All tracker rows · {len(all_rows):,} shipments", _xlsx_figures(all_rows, cols))
+    for label, rows in blocks:
+        if not rows:
+            continue
+        _cell(ws, row, 1, f"{label} carton", font=_font(11, bold=True, color="1D1C1A"))
+        row = _xlsx_header(ws, row + 1, ["Sr No."] + _headers(rows, cols))
+        sr = 0
+        for (year, quarter), q_rows in groupby(rows, key=lambda item: (item["fiscal_year"], item["quarter"])):
+            q_rows = list(q_rows)
+            q_label = core.quarter_label(year, quarter)
+            _cell(ws, row, 1, f"{q_label} Quarter", font=_font(10, bold=True, color=NAVY_HEX))
+            row += 1
+            for item in q_rows:
+                sr += 1
+                ws.cell(row, 1, sr)
+                _xlsx_values(ws, row, 2, item, cols)
+                row += 1
+            row = _xlsx_total(ws, row, f"{q_label} Subtotal", q_rows, cols, KRAFT_FILL)
+        row = _xlsx_total(ws, row, f"{label} Carton Total", rows, cols, KRAFT_FILL) + 1
+    _xlsx_total(ws, row, total_label, all_rows, cols, KRAFT_FILL)
+    _xlsx_widths(ws, cols)
+    ws.freeze_panes = "A7"
+    ws.sheet_view.showGridLines = False
+
+
+def _full_tracker_xlsx(con, supplier, fiscal_year, quarters, brand):
+    """Full Tracker workbook with one sheet per populated quarter and a final Total sheet."""
+    report_name, filename = FULL_TRACKER
+    # Matalan's Excel export contains only rows that have a non-zero eBiz Sales Order number.
+    parts = _tracker_parts(con, supplier, fiscal_year, quarters, brand, report_name, filename,
+                           so_only=brand == "Matalan")
+    if not parts:
+        return None
+    cols, blocks, _title, base_name = parts
+    all_rows = [item for _, rows in blocks for item in rows]
+    available = sorted({item["quarter"] for item in all_rows})
+    wb = Workbook()
+    wb.remove(wb.active)
+    supplier_name = core.supplier_name(con, supplier)
+    for quarter in available:
+        q_blocks = [(label, [item for item in rows if item["quarter"] == quarter]) for label, rows in blocks]
+        ws = wb.create_sheet(f"Q{quarter}")
+        _full_tracker_sheet(ws, supplier_name, fiscal_year, [quarter], cols, q_blocks,
+                            f"Q{quarter} Total")
+    ws = wb.create_sheet("Total")
+    _full_tracker_sheet(ws, supplier_name, fiscal_year, available, cols, blocks, "Tracker Grand Total")
+    return f"{base_name}.xlsx", _bytes(wb)
+
+
 FULL_TRACKER = ("Full Tracker Report", "Full Tracker Sheet for {brand}_{name}_{span}_{year}")
 
 
 def full_tracker_pdf(con, supplier, fiscal_year, quarters, brand):
     """Full Tracker Sheet for PacD (brand "PacD") or for Matalan (brand "Matalan": no PACD column)."""
-    return _tracker_pdf(con, supplier, fiscal_year, quarters, brand, *FULL_TRACKER)
+    return _full_tracker_pdf(con, supplier, fiscal_year, quarters, brand)
 
 
 def full_tracker_xlsx(con, supplier, fiscal_year, quarters, brand):
-    """full_tracker_pdf() as an Excel workbook."""
-    return _tracker_xlsx(con, supplier, fiscal_year, quarters, brand, *FULL_TRACKER)
+    """Full Tracker Excel workbook with populated quarter sheets followed by Total."""
+    return _full_tracker_xlsx(con, supplier, fiscal_year, quarters, brand)
 
 
 def _rebate(so_only):

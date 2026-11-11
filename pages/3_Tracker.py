@@ -20,7 +20,7 @@ def cancel_delete():
 
 @st.dialog("Delete tracker data", on_dismiss=cancel_delete)
 def confirm_delete(what, action):
-    """Ask once more, then run `action`: ("rows", kind, ids) | ("month", supplier, month) | ("file", name).
+    """Ask once more, then run a grouped-row, supplier-month, or imported-file deletion.
 
     The pending request lives in session state, so the dialog survives full reruns until it is used or dismissed.
     """
@@ -29,7 +29,7 @@ def confirm_delete(what, action):
     if st.button("Delete", type="primary", icon=":material/delete:"):
         con = core.connect()  # its own connection: nothing here keeps a page connection alive
         if action[0] == "rows":
-            deleted = core.delete_tracker_rows(con, action[1], action[2])
+            deleted = sum(core.delete_tracker_rows(con, kind, ids) for kind, ids in action[1].items())
         elif action[0] == "month":
             deleted = sum(core.delete_supplier_month(con, action[1], action[2]).values())
         else:
@@ -44,21 +44,28 @@ def ask(what, action):
     st.session_state["tracker_delete_pending"] = (what, action)
 
 
-def delete_tools(con, kind, supplier, name, edited):
-    tools(con, kind, supplier, name, edited)
+def delete_tools(con, kind, supplier, name, edited, combined=False):
+    tools(con, kind, supplier, name, edited, combined)
     pending = st.session_state.get("tracker_delete_pending")
     if pending:
         confirm_delete(*pending)
 
 
-def tools(con, kind, supplier, name, edited):
+def tools(con, kind, supplier, name, edited, combined=False):
     with st.expander("Delete tracker data", icon=":material/delete:"):
         mode = st.radio("Delete", DELETE_MODES, key="tracker_delete_mode", horizontal=True)
         if mode == "Selected rows":
-            ids = [int(edited.at[i, "id"]) for i in edited.index if edited.at[i, "delete"]] if edited is not None else []
-            st.caption("Tick rows in the Delete column of the table above.")
-            if st.button(f"Delete {len(ids):,} selected rows", disabled=not ids, key="tracker_delete_rows"):
-                ask(f"{len(ids):,} {core.SHEETS[kind]} rows of {name}", ("rows", kind, ids))
+            selected = {}
+            if edited is not None:
+                for i in edited.index:
+                    if edited.at[i, "select"]:
+                        row_kind = edited.at[i, "carton_type"] if combined else kind
+                        selected.setdefault(row_kind, []).append(int(edited.at[i, "id"]))
+            count = sum(len(ids) for ids in selected.values())
+            st.caption("Tick rows in the Select column of the table above.")
+            if st.button(f"Delete {count:,} selected rows", disabled=not count, key="tracker_delete_rows"):
+                detail = " and ".join(f"{len(ids):,} {core.SHEETS[row_kind]}" for row_kind, ids in selected.items())
+                ask(f"{detail} rows of {name}", ("rows", selected))
         elif mode == "Supplier and month":
             months = core.tracker_months(con, supplier)
             if not months:
@@ -109,34 +116,39 @@ def main():
         search = table_search("Search tracker rows", "tracker_search",
                               "Search SO, PO, factory, carton style, dates, quantities…")
 
-    count = core.editable_row_count(con, kind, supplier, search=search)
+    combined = bool(search and search.strip())
+    count = (core.editable_row_count_all(con, supplier, search=search) if combined
+             else core.editable_row_count(con, kind, supplier, search=search))
     pages = max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)
     selected_page = 1
     if pages > 1:
         selected_page = st.selectbox(
             "Page", range(1, pages + 1),
             format_func=lambda number: f"Page {number} of {pages}", width=180)
-    rows = core.editable_rows(con, kind, supplier, PAGE_SIZE,
-                              (selected_page - 1) * PAGE_SIZE, search=search)
+    rows = (core.editable_rows_all(con, supplier, PAGE_SIZE, (selected_page - 1) * PAGE_SIZE, search=search)
+            if combined else
+            core.editable_rows(con, kind, supplier, PAGE_SIZE, (selected_page - 1) * PAGE_SIZE, search=search))
     if not rows:
-        st.info("No rows match this sheet, supplier, and search.")
-        delete_tools(con, kind, supplier, names[supplier], None)
+        st.info("No rows match this supplier and search." if combined
+                else "No rows match this sheet and supplier.")
+        delete_tools(con, kind, supplier, names[supplier], None, combined)
         return
 
     frame = pd.DataFrame(rows)
-    shown = ["id", *core.COLUMNS, "source_file", "imported_at"]
+    shown = (["carton_type"] if combined else []) + ["id", *core.COLUMNS, "source_file"]
     frame = frame[shown]
-    frame.insert(0, "delete", False)
+    frame.insert(0, "select", False)
     config = {
-        "delete": st.column_config.CheckboxColumn("Delete", default=False, pinned=True),
+        "select": st.column_config.CheckboxColumn("Select", default=False, pinned=True),
         "id": st.column_config.NumberColumn("Row ID", disabled=True, pinned=True),
         "source_file": st.column_config.TextColumn("Source file", disabled=True),
-        "imported_at": st.column_config.TextColumn("Last changed", disabled=True),
         "po_received_date": st.column_config.TextColumn(
             core.HEADERS["po_received_date"], help="YYYY-MM-DD or DD/MM/YYYY"),
         "shipment_date": st.column_config.TextColumn(
             core.HEADERS["shipment_date"], help="YYYY-MM-DD or DD/MM/YYYY"),
     }
+    if combined:
+        config["carton_type"] = st.column_config.TextColumn("Carton type", disabled=True, pinned=True)
     for col in core.COLUMNS:
         if col not in config:
             config[col] = (st.column_config.NumberColumn(core.HEADERS[col])
@@ -145,13 +157,14 @@ def main():
 
     first = (selected_page - 1) * PAGE_SIZE + 1
     last = first + len(rows) - 1
-    st.caption(f"Editing rows {first:,}–{last:,} of {count:,} in {core.SHEETS[kind]} for "
+    scope = "Standard and Custom" if combined else core.SHEETS[kind]
+    st.caption(f"Editing rows {first:,}–{last:,} of {count:,} in {scope} for "
                f"{core.supplier_name(con, supplier)}. "
                "Dates accept YYYY-MM-DD or DD/MM/YYYY. Changes are saved together.")
     revision = core.data_revision(con)  # ticks and edits are kept by row position: reset them when rows change
     edited = st.data_editor(frame, key=f"tracker_editor_{kind}_{supplier}_{selected_page}_{revision}", hide_index=True,
                             num_rows="fixed", height=560, column_config=config)
-    delete_tools(con, kind, supplier, names[supplier], edited)
+    delete_tools(con, kind, supplier, names[supplier], edited, combined)
     if st.button("Save tracker changes", type="primary", icon=":material/save:"):
         changed = []
         for index in frame.index:
@@ -163,8 +176,12 @@ def main():
         if not changed:
             st.info("No tracker changes to save.")
             return
+        grouped = {}
+        for item in changed:
+            grouped.setdefault(item.get("carton_type", kind), []).append(item)
         try:
-            count = core.update_tracker_rows(con, kind, changed)
+            count = sum(core.update_tracker_rows(con, row_kind, items)
+                        for row_kind, items in grouped.items())
         except ValueError as exc:
             st.error(str(exc))
         else:

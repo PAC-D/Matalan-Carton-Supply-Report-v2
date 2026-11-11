@@ -576,6 +576,18 @@ def test_queries(demo_con):
     assert core.quarter_label(2026, 1) == "Q1 2026 (Dec-Mar)"
 
 
+def test_tracker_search_reads_both_carton_types():
+    con = core.connect()
+    common = dict(packaging_supplier="Pack Ltd", supplier_key="PACK", matalan_po="FIND-ME")
+    insert(con, "STD", shipment_date="2026-08-01", carton_qty=1, **common)
+    insert(con, "CUS", shipment_date="2026-08-02", carton_qty=2, **common)
+    insert(con, "STD", shipment_date="2026-08-03", carton_qty=3,
+           packaging_supplier="Pack Ltd", supplier_key="PACK", matalan_po="OTHER")
+    rows = core.editable_rows_all(con, "PACK", search="find-me")
+    assert [(row["carton_type"], row["carton_qty"]) for row in rows] == [("STD", 1), ("CUS", 2)]
+    assert core.editable_row_count_all(con, "PACK", search="find-me") == 2
+
+
 def test_tracker_rows_can_be_manually_edited(demo_con):
     row = core.editable_rows(demo_con, "STD", TW_KEY)[0]
     row["po_received_date"] = "04/08/2026"
@@ -726,10 +738,13 @@ def test_full_tracker_pdf_pacd(demo_con):
     text = pdf_text(data)
     total = sum(r["total_amount"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
     for expected in ("Full tracker", "Transworld Packaging (BD) Ltd.", "Standard carton",
-                     "Q3 2026 (Jul-Sep) Quarter", "Q3 2026 (Jul-Sep) Subtotal", "Standard Carton Total",
+                     "Q3 2026 (Jul-Sep)", "Q3 2026 (Jul-Sep) Total", "Standard Carton Total",
                      "Custom Carton Total", "Tracker Grand Total", f"{total:,.2f}", "PACD Rebate",
                      "Sheet 1 of", "Generated"):
         assert expected in text, expected
+    quarter = text.index("Q3 2026 (Jul-Sep)", text.index("All tracker rows"))
+    assert text.index("Standard carton", quarter) < text.index("Custom carton", quarter) \
+        < text.index("Q3 2026 (Jul-Sep) Total", quarter)
     assert len(pypdf.PdfReader(BytesIO(data)).pages[0].images) == 2  # both logos
 
 
@@ -1056,16 +1071,22 @@ def test_full_tracker_xlsx_matches_the_pdf(demo_con):
     name, data = reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [3], "PacD")
     assert name == "Full Tracker Sheet for PacD_Transworld Packaging (BD) Ltd_Q3_2026.xlsx"
     qty = sum(r["carton_qty"] for kind in ("STD", "CUS") for r in core.rows(demo_con, kind, supplier=TW_KEY))
-    assert xlsx_total(data, "Tracker Grand Total") == qty
+    wb = openpyxl.load_workbook(BytesIO(data))
+    assert wb.sheetnames == ["Q3", "Total"]
+    assert xlsx_total(data, "Tracker Grand Total", "Total") == qty
     assert xlsx_total(data, "Q3 2026 (Jul-Sep) Subtotal") == sum(
         r["carton_qty"] for r in core.rows(demo_con, "STD", supplier=TW_KEY))
-    cells = [c for row in openpyxl.load_workbook(BytesIO(data)).active.iter_rows(values_only=True) for c in row]
+    cells = [c for row in wb.active.iter_rows(values_only=True) for c in row]
     assert "Full tracker" in cells and "Transworld Packaging (BD) Ltd." in cells
     assert any(isinstance(c, date) for c in cells)  # dates are real Excel dates
     _, matalan = reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [3], "Matalan")
-    header = next(r for r in openpyxl.load_workbook(BytesIO(matalan)).active.iter_rows(values_only=True)
+    matalan_wb = openpyxl.load_workbook(BytesIO(matalan))
+    header = next(r for r in matalan_wb.active.iter_rows(values_only=True)
                   if "Carton QTY" in r)
     assert not any("PACD" in str(h) for h in header)
+    expected = sum(r["carton_qty"] for kind in ("STD", "CUS")
+                   for r in core.rows(demo_con, kind, supplier=TW_KEY) if core._so(r["ebiz_so"]))
+    assert xlsx_total(matalan, "Tracker Grand Total", "Total") == expected
     assert reports.full_tracker_xlsx(demo_con, TW_KEY, 2026, [1], "PacD") is None
 
 
@@ -1461,6 +1482,13 @@ def test_editors_reset_when_the_data_changes():
         key = re.search(r"st\.data_editor\(frame, key=f\"([^\"]+)\"", text).group(1)
         assert "{revision}" in key, page
         assert "revision = core.data_revision(con)" in text, page
+
+
+def test_tracker_editor_uses_select_and_hides_last_changed():
+    text = (HERE / "pages" / "3_Tracker.py").read_text(encoding="utf-8")
+    assert 'CheckboxColumn("Select"' in text
+    assert 'TextColumn("Last changed"' not in text
+    assert "editable_rows_all" in text and "editable_row_count_all" in text
 
 
 def test_statement_period_shows_gaps_between_quarters():
