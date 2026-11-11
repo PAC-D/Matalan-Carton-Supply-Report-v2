@@ -49,6 +49,33 @@ def _read_uploads(con, uploads, kind):
     return files
 
 
+def _highlight(table):
+    """Red cells: a value that differs from the calculation, or a blank that can't be calculated."""
+    style = pd.DataFrame("", index=table.index, columns=table.columns)
+    style["Value"] = "background-color: rgba(220, 60, 40, 0.22)"
+    return style
+
+
+def calc_table(issues, message, first, last=None):
+    """Calculation check: saved values that differ from the workbook formulas, kept as they are."""
+    if not issues:
+        return
+    st.warning(f"{len(issues):,} {message}")
+    table = pd.DataFrame(issues)
+    order = first + ["Column", "Value", "Calculated", "Problem", "Carton Selection",
+                     "Packaging supplier", "eBiz Sales Order #", last]
+    st.dataframe(table[[c for c in order if c in table]].style.apply(_highlight, axis=None)
+                 .format({"Value": "{:,.4f}", "Calculated": "{:,.4f}"}, na_rep="—"), hide_index=True)
+
+
+def saved_calc_check(con):
+    issues = core.saved_calc_issues(con)
+    if issues:
+        with st.expander(f"Calculation check of saved tracker rows ({len(issues):,})", icon=":material/calculate:"):
+            calc_table(issues, "saved cell(s) differ from the calculation or can't be calculated. "
+                       "Edit them on the Tracker page or in the next import.", ["Sheet", "Row ID"])
+
+
 def tracker_import(con):
     with st.container(border=True, key="card_tracker_import"):
         st.subheader("Tracker workbooks")
@@ -81,6 +108,11 @@ def tracker_import(con):
                     })
                 core.apply_dates(issues, zip(map(as_date, edited["PO Received Date"]),
                                              map(as_date, edited["Shipment Date"])))
+
+            calc_table(core.calc_check(con, files),
+                       "cell(s) in the uploaded files differ from the calculation or can't be calculated. "
+                       "Blank cells that can be calculated are filled in on import.",
+                       ["Sheet", "Excel row"], "File")
 
             st.dataframe(pd.DataFrame([{"File": name, **row}
                                        for name, data in files.items()
@@ -167,6 +199,7 @@ def main():
         st.success(message, icon=":material/check_circle:")
         st.toast(message, icon=":material/check_circle:")
     tracker_import(con)
+    saved_calc_check(con)
     ebiz_import(con)
 
 
