@@ -2,7 +2,13 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import clear_built_reports, header, page, table_search
+from web_ui import (
+    clear_built_reports,
+    operation_status,
+    page,
+    report_page_header,
+    table_search,
+)
 
 PAGE_SIZE = 250
 DELETE_MODES = ["Selected rows", "Supplier and month", "Imported file"]
@@ -27,16 +33,20 @@ def confirm_delete(what, action):
     st.write(f"Delete {what}?")
     st.caption("This cannot be undone here. RDS keeps 7 days of backups.")
     if st.button("Delete", type="primary", icon=":material/delete:"):
-        con = core.connect()  # its own connection: nothing here keeps a page connection alive
-        if action[0] == "rows":
-            deleted = sum(core.delete_tracker_rows(con, kind, ids) for kind, ids in action[1].items())
-        elif action[0] == "month":
-            deleted = sum(core.delete_supplier_month(con, action[1], action[2]).values())
-        else:
-            deleted = sum(core.delete_source_file(con, action[1]).values())
-        clear_built_reports()
-        cancel_delete()
-        st.session_state["tracker_deleted"] = deleted
+        with operation_status("Deleting tracker data…", "Tracker data deleted"):
+            con = core.connect()  # its own connection: nothing here keeps a page connection alive
+            if action[0] == "rows":
+                deleted = sum(
+                    core.delete_tracker_rows(con, kind, ids)
+                    for kind, ids in action[1].items()
+                )
+            elif action[0] == "month":
+                deleted = sum(core.delete_supplier_month(con, action[1], action[2]).values())
+            else:
+                deleted = sum(core.delete_source_file(con, action[1]).values())
+            clear_built_reports()
+            cancel_delete()
+            st.session_state["tracker_deleted"] = deleted
         st.rerun()
 
 
@@ -100,14 +110,12 @@ def main():
         st.toast(f"Deleted {deleted:,} tracker rows", icon=":material/check_circle:")
     suppliers = core.tracker_suppliers(con)
     total = sum(core.editable_row_count(con, kind) for kind in core.TABLES)
-    header("Tracker data",
-           "Review and manually correct imported tracker values. Report calculations update immediately.",
-           "Stored rows", f"{total:,}")
+    report_page_header("Tracker data", "Stored<br>rows", f"{total:,}")
     if not suppliers:
         st.info("No tracker rows yet. Import a workbook on the Data import page.")
         return
 
-    with st.container(border=True, key="card_tracker_filters"):
+    with st.container(key="manage_filter_tracker"):
         a, b = st.columns(2)
         kind = a.segmented_control("Tracker sheet", ["STD", "CUS"], default="STD",
                                    format_func=lambda value: core.SHEETS[value])
@@ -158,14 +166,22 @@ def main():
     first = (selected_page - 1) * PAGE_SIZE + 1
     last = first + len(rows) - 1
     scope = "Standard and Custom" if combined else core.SHEETS[kind]
-    st.caption(f"Editing rows {first:,}–{last:,} of {count:,} in {scope} for "
-               f"{core.supplier_name(con, supplier)}. "
-               "Dates accept YYYY-MM-DD or DD/MM/YYYY. Changes are saved together.")
-    revision = core.data_revision(con)  # ticks and edits are kept by row position: reset them when rows change
-    edited = st.data_editor(frame, key=f"tracker_editor_{kind}_{supplier}_{selected_page}_{revision}", hide_index=True,
-                            num_rows="fixed", height=560, column_config=config)
-    delete_tools(con, kind, supplier, names[supplier], edited, combined)
-    if st.button("Save tracker changes", type="primary", icon=":material/save:"):
+    with st.container(key="manage_panel_tracker_data"):
+        st.caption(f"Editing rows {first:,}–{last:,} of {count:,} in {scope} for "
+                   f"{core.supplier_name(con, supplier)}. "
+                   "Dates accept YYYY-MM-DD or DD/MM/YYYY. Changes are saved together.")
+        revision = core.data_revision(con)  # ticks and edits are kept by row position: reset them when rows change
+        edited = st.data_editor(
+            frame,
+            key=f"tracker_editor_{kind}_{supplier}_{selected_page}_{revision}",
+            hide_index=True,
+            num_rows="fixed",
+            height=560,
+            column_config=config,
+        )
+        delete_tools(con, kind, supplier, names[supplier], edited, combined)
+    if st.button("Save tracker changes", type="primary", icon=":material/save:",
+                 key="manage_primary_tracker_save"):
         changed = []
         for index in frame.index:
             different = any(
@@ -180,12 +196,13 @@ def main():
         for item in changed:
             grouped.setdefault(item.get("carton_type", kind), []).append(item)
         try:
-            count = sum(core.update_tracker_rows(con, row_kind, items)
-                        for row_kind, items in grouped.items())
+            with operation_status("Saving tracker changes…", "Tracker changes saved"):
+                count = sum(core.update_tracker_rows(con, row_kind, items)
+                            for row_kind, items in grouped.items())
+                clear_built_reports()
         except ValueError as exc:
             st.error(str(exc))
         else:
-            clear_built_reports()
             st.toast(f"Saved {count:,} tracker rows", icon=":material/check_circle:")
             st.rerun()
 

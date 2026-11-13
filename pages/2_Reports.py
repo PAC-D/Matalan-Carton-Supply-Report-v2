@@ -5,7 +5,7 @@ import streamlit as st
 
 import core
 import reports
-from web_ui import page, reports_header
+from web_ui import download_started, operation_status, page, reports_header
 
 REPORTS_DIR = Path(os.environ.get(
     "REPORTS_DIR", Path(__file__).resolve().parents[1] / "Reports"))
@@ -89,6 +89,7 @@ def report_controls():
                 f"Download all ({len(items)} files)" if ready else "Download all",
                 zipped, file_name=zip_name, type="secondary", icon=":material/download:",
                 key="report_download_all", width="content", disabled=not ready,
+                on_click=download_started, args=(zip_name,),
             )
             save = st.button(
                 "Save to Reports folder", icon=":material/save:",
@@ -101,11 +102,12 @@ def report_controls():
                         st.download_button(
                             path, data, file_name=Path(path).name, key=path,
                             type="secondary", icon=":material/download:", width="content",
+                            on_click=download_started, args=(Path(path).name,),
                         )
         else:
             st.caption("Build the current selection to prepare downloads.")
     if build:
-        with st.spinner("Building reports…"):
+        with operation_status("Building reports…", "Reports are ready to download"):
             cached = core.cache_get(con, artifact_key)
             if cached is None:
                 items = reports.build_all(con, picked, year, chosen, discrepancy=with_disc)
@@ -117,7 +119,7 @@ def report_controls():
         st.rerun(scope="fragment")
     if save:
         try:
-            with st.spinner("Building reports…"):
+            with operation_status("Saving reports…", "Reports saved to the Reports folder"):
                 paths = reports.save_all(con, picked, year, chosen, REPORTS_DIR,
                                          discrepancy=with_disc)
         except OSError as exc:

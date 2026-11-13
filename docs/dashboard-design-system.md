@@ -38,6 +38,8 @@ charts and tables feel related and the page does not develop empty visual zones.
 - Title accent: `linear-gradient(180deg, #173B6D, #B6193B)`
 - Navy metric: `linear-gradient(138deg, #091D3C, #173B6D)`
 - Crimson metric: `linear-gradient(138deg, #7C102A, #C32148)`
+- Matte navy metric shades: `#112E55`, `#274D78`, and `#42658E`
+- Matte crimson metric shades: `#7D1936`, `#942E4B`, and `#A84662`
 - Selected supplier chip: `linear-gradient(112deg, #142F57, #A6193A)`
 
 ## Typography
@@ -153,3 +155,56 @@ is active. Only viewport breakpoints alter those shared values.
   searchable rows, and a navy workbook download action.
 - Matching, filtering, cache behavior, table values, and workbook generation are
   unchanged.
+
+## Live report extensions
+
+- Cross Reference and Discrepancy cards alternate solid matte navy and crimson
+  surfaces. Deep, middle, and soft shades preserve the sequence without using
+  gradients or repeating the same color.
+- Discrepancy cards retain their existing section-filter behavior and persistent
+  one-click selection state.
+- Rebate metrics use the same matte color sequence as static cards. Tracker
+  rows, carton quantity, total amount, and rebate totals are display-only and do
+  not introduce new filtering behavior.
+- The Rebate supplier selector remains full-width. Fiscal year, quarters, and
+  row scope share one aligned desktop row, reflow to two columns at tablet
+  widths, and stack cleanly on narrow mobile screens.
+- Discrepancy and Rebate use the compact report heading, numeric status badge,
+  and bordered filter surface established on Cross Reference.
+
+## Manage extensions
+
+Tracker data, eBiz data, Rates, and Data import reuse the same compact application
+language without changing their data workflows.
+
+- Each page uses the two-line product/page heading and a concise numeric badge.
+- Filters sit in compact white responsive surfaces. Multi-column filters collapse
+  to a single readable column on narrow mobile screens.
+- Editors and upload workflows use restrained white panels with 14px corners,
+  compact captions, subtle borders, and consistent internal spacing.
+- Save, import, and update actions use a solid matte navy treatment. Destructive
+  row-selection actions use a white surface with a crimson border and label.
+- Existing editor keys, calculations, validation, pagination, confirmation
+  dialogs, cache behavior, database mutations, and report invalidation remain
+  unchanged.
+- Data import presents Tracker and eBiz sources as two compact upload cards on
+  desktop and one column on mobile. Each card shows the current row count,
+  source-file count, and most recent loaded date when data is available.
+- Once files are selected, an animated status surface and progress indicator
+  report the current filename, completed file count, validation result, and
+  cache restoration state. Validation remains separate from the final database
+  confirmation action.
+
+## Operation feedback
+
+- Every server-side save, confirmed delete, import/update, report build, folder
+  export, and cache-miss workbook generation displays the same compact animated
+  running status. It resolves to an explicit completed or failed state.
+- Upload controls retain Streamlit's browser transfer progress; uploaded files
+  then enter the per-file validation status described above.
+- Download files are prepared before their buttons are enabled. Clicking a
+  prepared download immediately confirms that the file was handed to the
+  browser, whose native download UI owns the remaining transfer.
+- Selector buttons and delete-request buttons that only open a confirmation
+  dialog do not show artificial loading states because no long-running work has
+  started yet.

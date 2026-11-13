@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 import core
-from web_ui import clear_built_reports, header, page
+from web_ui import clear_built_reports, operation_status, page, report_page_header
 
 DATE_EDITS = {
     "PO Received Date": "PO Received Date to import",
@@ -34,18 +34,42 @@ def _read_uploads(con, uploads, kind):
     if not uploads:
         return files
     label = "tracker" if kind == "tracker" else "eBiz"
-    with st.spinner(f"Validating {label} uploads…"):
-        for upload in uploads:
+    total = len(uploads)
+    with st.status(
+        f"Validating {total} {label} file{'s' if total != 1 else ''}…",
+        expanded=True,
+        state="running",
+        type="compact",
+    ) as validation:
+        progress = st.progress(0, text="Preparing validation…")
+        for index, upload in enumerate(uploads, 1):
+            progress.progress(
+                (index - 1) / total,
+                text=f"Checking {upload.name} · file {index} of {total}",
+            )
             try:
                 files[upload.name], cached = read_cached_upload(con, upload.getvalue(), kind)
-                st.write(f"✓ {upload.name} — {'restored from cache' if cached else 'validated'}")
+                st.write(
+                    f":material/check_circle: **{upload.name}** — "
+                    f"{'restored from cache' if cached else 'validated successfully'}"
+                )
             except core.ImportFileError as exc:
                 failures += 1
                 st.error(f"{upload.name}: {exc} This file will not be imported.")
-    if failures:
-        st.error(f"Validation finished with {failures} failed file(s).")
-    else:
-        st.success(f"{len(files)} {label} file(s) ready to import.")
+            progress.progress(index / total, text=f"Checked {index} of {total} files")
+        progress.empty()
+        if failures:
+            validation.update(
+                label=f"Validation finished · {len(files)} ready · {failures} failed",
+                state="error",
+                expanded=True,
+            )
+        else:
+            validation.update(
+                label=f"{len(files)} {label} file{'s' if len(files) != 1 else ''} ready",
+                state="complete",
+                expanded=False,
+            )
     return files
 
 
@@ -76,13 +100,12 @@ def saved_calc_check(con):
                        "Edit them on the Tracker page or in the next import.", ["Sheet", "Row ID"])
 
 
-def tracker_import(con):
-    with st.container(border=True, key="card_tracker_import"):
-        st.subheader("Tracker workbooks")
-        st.caption("Upload one or more .xlsx or .xlsm files containing TRACK_STD and TRACK_CUS.")
-        uploads = st.file_uploader("Tracker workbooks", type=["xlsx", "xlsm"],
-                                   accept_multiple_files=True, key="tracker_upload",
-                                   label_visibility="collapsed")
+def tracker_import(con, uploads):
+    if not uploads:
+        return
+    with st.container(key="manage_panel_tracker_import"):
+        st.subheader("Tracker validation")
+        st.caption("Files are checked before any Tracker rows are changed.")
         files = _read_uploads(con, uploads, "tracker")
         if files:
             reused, issues = core.check_dates(con, files)
@@ -122,20 +145,22 @@ def tracker_import(con):
                 st.error("These files contain the same sheet, supplier and month. Remove one file.")
                 st.dataframe(pd.DataFrame(clash), hide_index=True)
             if st.button("Confirm tracker import", type="primary", disabled=bool(clash),
-                         icon=":material/upload:"):
+                         icon=":material/upload:", key="manage_primary_tracker_import"):
                 try:
-                    with st.spinner("Saving tracker data…"):
+                    with operation_status("Importing tracker data…", "Tracker import complete"):
                         counts = core.save_many(con, files)
                         total = sum(sum(c.values()) for c in counts.values())
+                        clear_built_reports()
                 except Exception as exc:
                     st.error(f"Tracker import failed. No partial changes were saved. {exc}")
                 else:
-                    clear_built_reports()
                     st.success(f"Import finished: {total:,} tracker rows are saved.")
                     st.toast(f"Imported {total:,} tracker rows", icon=":material/check_circle:")
                     if core.unrated_count(con):
                         st.warning("Some shipments are earlier than the first rate. Add an earlier rate.")
 
+
+def saved_date_corrections(con):
     saved = core.saved_dates(con)
     if saved:
         with st.expander(f"Saved date corrections ({len(saved)})", icon=":material/event_repeat:"):
@@ -145,22 +170,17 @@ def tracker_import(con):
                                   key=f"saved_dates_{hash(tuple(item['key'] for item in saved))}")
             if st.button("Forget selected corrections", disabled=not picked.selection.rows,
                          icon=":material/delete:"):
-                core.forget_dates(con, [saved[i]["key"] for i in picked.selection.rows])
+                with operation_status("Removing date corrections…", "Date corrections removed"):
+                    core.forget_dates(con, [saved[i]["key"] for i in picked.selection.rows])
                 st.rerun()
 
 
-def ebiz_import(con):
-    status = core.ebiz_status(con)
-    with st.container(border=True, key="card_ebiz_import"):
-        st.subheader("eBiz exports")
-        if status:
-            st.caption(f"Current data: {status[0]:,} rows from {len(status[1])} file(s), loaded "
-                       f"{status[2].replace('T', ' ')[:16]}.")
-        else:
-            st.caption("No eBiz data yet. Upload one or more vendor exports.")
-        uploads = st.file_uploader("eBiz exports", type=["xlsx", "xlsm"],
-                                   accept_multiple_files=True, key="ebiz_upload",
-                                   label_visibility="collapsed")
+def ebiz_import(con, uploads):
+    if not uploads:
+        return
+    with st.container(key="manage_panel_ebiz_import"):
+        st.subheader("eBiz validation")
+        st.caption("Files are checked before any vendor rows are replaced.")
         files = _read_uploads(con, uploads, "ebiz")
         if not files:
             return
@@ -175,32 +195,78 @@ def ebiz_import(con):
             st.dataframe(pd.DataFrame(clash), hide_index=True)
         st.caption("Only the uploaded vendors will be replaced. All other vendors will be kept unchanged.")
         if st.button("Update eBiz data", type="primary", disabled=bool(clash),
-                     icon=":material/sync:"):
+                     icon=":material/sync:", key="manage_primary_ebiz_import"):
             try:
-                with st.spinner("Replacing eBiz data…"):
+                with operation_status("Updating eBiz data…", "eBiz update complete"):
                     counts = core.replace_ebiz(con, files)
                     total = sum(counts.values())
+                    clear_built_reports()
             except Exception as exc:
                 st.error(f"eBiz import failed. Existing eBiz data is unchanged. {exc}")
             else:
-                clear_built_reports()
                 st.session_state["import_flash"] = (
                     f"Update finished: {total:,} uploaded eBiz rows are saved.")
                 st.rerun()
+
+
+def upload_sources(con):
+    """Render compact upload choices; validation and database changes stay separate."""
+    ebiz_status = core.ebiz_status(con)
+    tracker_files = core.tracker_files(con)
+    tracker_rows = sum(item["STD"] + item["CUS"] for item in tracker_files)
+    tracker_loaded = max(
+        (item["imported_at"] or "" for item in tracker_files), default=""
+    ).replace("T", " ")[:16]
+    with st.container(key="manage_import_sources"):
+        tracker_column, ebiz_column = st.columns(2, gap="small")
+        with tracker_column:
+            st.subheader("Tracker workbooks")
+            if tracker_files:
+                st.caption(
+                    f"Current data: {tracker_rows:,} rows from {len(tracker_files)} file(s) · "
+                    f"Last loaded: {tracker_loaded or 'Unknown'}"
+                )
+            else:
+                st.caption("No Tracker data loaded · XLSX or XLSM · multiple files allowed")
+            tracker_uploads = st.file_uploader(
+                "Tracker workbooks",
+                type=["xlsx", "xlsm"],
+                accept_multiple_files=True,
+                key="tracker_upload",
+                label_visibility="collapsed",
+            )
+        with ebiz_column:
+            st.subheader("eBiz exports")
+            if ebiz_status:
+                st.caption(
+                    f"Current data: {ebiz_status[0]:,} rows from {len(ebiz_status[1])} file(s) · "
+                    f"Last loaded: {ebiz_status[2].replace('T', ' ')[:16]}"
+                )
+            else:
+                st.caption("No eBiz data loaded · XLSX or XLSM · multiple files allowed")
+            ebiz_uploads = st.file_uploader(
+                "eBiz exports",
+                type=["xlsx", "xlsm"],
+                accept_multiple_files=True,
+                key="ebiz_upload",
+                label_visibility="collapsed",
+            )
+    return tracker_uploads, ebiz_uploads
 
 
 @page
 def main():
     con = core.connect()
     tracker_count = sum(core.editable_row_count(con, kind) for kind in core.TABLES)
-    header("Data import", "Validate and import tracker workbooks and eBiz vendor exports.",
-           "Tracker rows", f"{tracker_count:,}")
+    report_page_header("Data import", "Tracker<br>rows", f"{tracker_count:,}")
     if message := st.session_state.pop("import_flash", None):
         st.success(message, icon=":material/check_circle:")
         st.toast(message, icon=":material/check_circle:")
-    tracker_import(con)
+    tracker_uploads, ebiz_uploads = upload_sources(con)
+    tracker_import(con, tracker_uploads)
+    saved_date_corrections(con)
     saved_calc_check(con)
-    ebiz_import(con)
+    ebiz_import(con, ebiz_uploads)
 
 
 main()

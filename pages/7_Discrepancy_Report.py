@@ -3,7 +3,15 @@ import streamlit as st
 
 import core
 import reports
-from web_ui import header, interactive_kpi_grid, page, search_frame, table_search
+from web_ui import (
+    dashboard_interactive_metric_grid,
+    download_started,
+    operation_status,
+    page,
+    report_page_header,
+    search_frame,
+    table_search,
+)
 
 TRACKER_COLUMNS = [column for column in core.COLUMNS if column != "note"] + ["pacd", "matalan_rebate"]
 
@@ -53,11 +61,10 @@ def main():
     con = core.connect()
     suppliers = core.reconciliation_suppliers(con)
     status = core.ebiz_status(con)
-    header(
+    report_page_header(
         "Discrepancy report",
-        "Review the five live exception sections used by the generated Discrepancy Report PDF.",
-        "eBiz status",
-        f"{status[0]:,} rows loaded" if status else "Not loaded",
+        "eBiz<br>rows",
+        f"{core.ebiz_row_count(con):,}",
     )
     if not suppliers:
         st.info("No Tracker or eBiz supplier data is available. Import data first.")
@@ -72,25 +79,35 @@ def main():
         f"{name} ({key})" if name in duplicates else name: key
         for key, name in names.items()
     }
-    supplier_label = st.selectbox(
-        "Packaging supplier", list(supplier_options), key="discrepancy_supplier")
+    with st.container(key="discrepancy_filter_bar"):
+        supplier_label = st.selectbox(
+            "Packaging supplier",
+            list(supplier_options),
+            key="discrepancy_supplier",
+            width="stretch",
+        )
     supplier = supplier_options[supplier_label]
     xref = core.cross_reference(con, supplier)
     orders = {order["so"]: order for order in xref["orders"]}
     order_counts = {label: sum(order["status"] == label for order in xref["orders"])
                     for label in ("Not in eBiz", "Tracker > eBiz", "Tracker < eBiz")}
     no_so = sum(1 for rows in xref["rows"].values() for row in rows if not row["so"])
-    active = interactive_kpi_grid([
+    active = dashboard_interactive_metric_grid([
         {"id": "missing", "label": "Missing orders",
-         "value": f"{order_counts['Not in eBiz']:,}"},
+         "value": f"{order_counts['Not in eBiz']:,}",
+         "note": "Tracker orders not in eBiz", "tone": "matte-navy-deep"},
         {"id": "greater", "label": "Tracker > eBiz",
-         "value": f"{order_counts['Tracker > eBiz']:,}"},
+         "value": f"{order_counts['Tracker > eBiz']:,}",
+         "note": "Higher Tracker quantity", "tone": "matte-crimson-deep"},
         {"id": "lower", "label": "Tracker < eBiz",
-         "value": f"{order_counts['Tracker < eBiz']:,}"},
-        {"id": "no_so", "label": "Rows without SO#", "value": f"{no_so:,}"},
+         "value": f"{order_counts['Tracker < eBiz']:,}",
+         "note": "Lower Tracker quantity", "tone": "matte-navy-mid"},
+        {"id": "no_so", "label": "Rows without SO#", "value": f"{no_so:,}",
+         "note": "Tracker rows needing review", "tone": "matte-crimson-mid"},
         {"id": "ebiz_only", "label": "eBiz-only rows",
-         "value": f"{len(xref['ebiz_only']):,}"},
-    ], "discrepancy", default="missing")
+         "value": f"{len(xref['ebiz_only']):,}",
+         "note": "Not found in Tracker", "tone": "matte-navy-soft"},
+    ], "discrepancy", default="missing", columns=5)
 
     section = {
         "missing": ("Not in eBiz", "Tracker orders not found in eBiz"),
@@ -151,7 +168,9 @@ def main():
         if cached is not None:
             st.session_state["live_discrepancy_pdf"] = (build_key, cached)
     if st.button("Prepare Discrepancy Report", icon=":material/description:"):
-        with st.spinner("Preparing discrepancy PDF and Excel…"):
+        with operation_status(
+            "Preparing discrepancy PDF and Excel…", "Discrepancy files ready"
+        ):
             cached = core.cache_get(con, artifact_key)
             if cached is None:
                 cached = [reports.discrepancy_pdf(con, supplier, xref), reports.discrepancy_xlsx(con, supplier, xref)]
@@ -162,9 +181,12 @@ def main():
         (pdf_name, pdf), (xlsx_name, xlsx) = built[1]
         with st.container(horizontal=True):
             st.download_button("Download Discrepancy Report PDF", pdf, file_name=pdf_name, mime="application/pdf",
-                               icon=":material/download:", key="discrepancy_pdf_download")
+                               icon=":material/download:", key="discrepancy_pdf_download",
+                               on_click=download_started, args=(pdf_name,))
             st.download_button("Download Discrepancy Report Excel", xlsx, file_name=xlsx_name,
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", icon=":material/download:", key="discrepancy_xlsx_download")
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               icon=":material/download:", key="discrepancy_xlsx_download",
+                               on_click=download_started, args=(xlsx_name,))
 
 
 main()

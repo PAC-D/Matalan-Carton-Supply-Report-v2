@@ -3,7 +3,15 @@ import streamlit as st
 
 import core
 import reports
-from web_ui import header, kpi_grid, page, search_frame, table_search
+from web_ui import (
+    dashboard_metric_grid,
+    download_started,
+    operation_status,
+    page,
+    report_page_header,
+    search_frame,
+    table_search,
+)
 
 REPORT_COLUMNS = [column for column in core.COLUMNS if column != "note"]
 
@@ -50,34 +58,44 @@ def show_rebate_rows(frame, key):
 def main():
     con = core.connect()
     suppliers = core.suppliers(con)
-    header(
+    report_page_header(
         "Rebate report",
-        "View detailed Standard and Custom carton rebate calculations directly from the live Tracker database.",
-        "Available suppliers",
+        "Available<br>suppliers",
         f"{len(suppliers):,}",
     )
     if not suppliers:
         st.info("No dated Tracker data is available. Import a tracker workbook first.")
         return
 
-    with st.container(border=True, key="card_rebate_filters"):
+    with st.container(key="rebate_filter_bar"):
         supplier = st.selectbox(
             "Packaging supplier", suppliers,
             format_func={key: core.supplier_name(con, key) for key in suppliers}.get,
             key="rebate_supplier",
+            width="stretch",
         )
         years = core.fiscal_years(con, supplier=supplier)
-        year = st.selectbox("Fiscal year", years, index=len(years) - 1, key="rebate_year")
-        available = core.quarters(con, supplier=supplier, fiscal_year=year)
-        quarters = st.pills(
-            "Quarters", available, default=available, selection_mode="multi",
-            format_func=lambda quarter: core.quarter_label(year, quarter),
-            key="rebate_quarters",
-        )
-        so_only = st.radio(
-            "Rows", ["All tracker rows", "Rows with eBiz SO#"], horizontal=True, key="rebate_rows",
-            help="Rows with eBiz SO# leaves out rows whose eBiz Sales Order # is blank or 0.",
-        ) == "Rows with eBiz SO#"
+        with st.container(key="rebate_secondary_filters"):
+            year_column, quarter_column, rows_column = st.columns(
+                [0.7, 1.25, 1.05], gap="small", vertical_alignment="bottom"
+            )
+            with year_column:
+                year = st.selectbox(
+                    "Fiscal year", years, index=len(years) - 1, key="rebate_year"
+                )
+            available = core.quarters(con, supplier=supplier, fiscal_year=year)
+            with quarter_column:
+                quarters = st.pills(
+                    "Quarters", available, default=available, selection_mode="multi",
+                    format_func=lambda quarter: core.quarter_label(year, quarter),
+                    key="rebate_quarters",
+                )
+            with rows_column:
+                so_only = st.radio(
+                    "Rows", ["All tracker rows", "Rows with eBiz SO#"],
+                    horizontal=True, key="rebate_rows",
+                    help="Rows with eBiz SO# leaves out rows whose eBiz Sales Order # is blank or 0.",
+                ) == "Rows with eBiz SO#"
     if not quarters:
         st.warning("Choose at least one quarter.")
         return
@@ -89,13 +107,18 @@ def main():
     total_amount = sum(row["total_amount"] or 0 for row in all_rows)
     pacd = sum(row["pacd"] or 0 for row in all_rows)
     rebate = sum(row["matalan_rebate"] or 0 for row in all_rows)
-    kpi_grid([
-        {"label": "Tracker rows", "value": f"{len(all_rows):,}"},
-        {"label": "Carton quantity", "value": f"{total_qty:,.0f}"},
-        {"label": "Total amount", "value": f"$ {total_amount:,.2f}"},
-        {"label": "PACD Rebate", "value": f"$ {pacd:,.2f}"},
-        {"label": "Matalan rebate", "value": f"$ {rebate:,.2f}"},
-    ])
+    dashboard_metric_grid([
+        {"label": "Tracker rows", "value": f"{len(all_rows):,}",
+         "note": "Rows in the active selection", "tone": "matte-navy-deep"},
+        {"label": "Carton quantity", "value": f"{total_qty:,.0f}",
+         "note": "Total selected cartons", "tone": "matte-crimson-deep"},
+        {"label": "Total amount", "value": f"$ {total_amount:,.2f}",
+         "note": "Selected Tracker value", "tone": "matte-navy-mid"},
+        {"label": "PACD Rebate", "value": f"$ {pacd:,.2f}",
+         "note": "Calculated PACD rebate", "tone": "matte-crimson-mid"},
+        {"label": "Matalan rebate", "value": f"$ {rebate:,.2f}",
+         "note": "Calculated Matalan rebate", "tone": "matte-navy-soft"},
+    ], columns=5)
 
     standard_tab, custom_tab = st.tabs([
         f"Standard carton ({len(standard):,})", f"Custom carton ({len(custom):,})",
@@ -116,7 +139,7 @@ def main():
         if cached is not None:
             st.session_state["live_rebate_pdf"] = (build_key, cached)
     if st.button("Prepare Rebate Report", icon=":material/description:"):
-        with st.spinner("Preparing rebate PDF and Excel…"):
+        with operation_status("Preparing rebate PDF and Excel…", "Rebate files ready"):
             cached = core.cache_get(con, artifact_key)
             if cached is None:
                 cached = [reports.rebate_report_pdf(con, supplier, year, quarters, so_only=so_only),
@@ -128,9 +151,12 @@ def main():
         (pdf_name, pdf), (xlsx_name, xlsx) = built[1]
         with st.container(horizontal=True):
             st.download_button("Download Rebate Report PDF", pdf, file_name=pdf_name, mime="application/pdf",
-                               icon=":material/download:", key="rebate_pdf_download")
+                               icon=":material/download:", key="rebate_pdf_download",
+                               on_click=download_started, args=(pdf_name,))
             st.download_button("Download Rebate Report Excel", xlsx, file_name=xlsx_name,
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", icon=":material/download:", key="rebate_xlsx_download")
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               icon=":material/download:", key="rebate_xlsx_download",
+                               on_click=download_started, args=(xlsx_name,))
 
 
 main()

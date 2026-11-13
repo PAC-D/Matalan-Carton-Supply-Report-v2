@@ -6,6 +6,8 @@ import reports
 from web_ui import (
     cross_reference_header,
     dashboard_interactive_metric_grid,
+    download_started,
+    operation_status,
     page,
     search_frame,
     table_search,
@@ -112,27 +114,27 @@ def reconciliation_view():
     active = dashboard_interactive_metric_grid([
         {
             "id": "all", "label": "Tracker orders", "value": f"{len(rows):,}",
-            "note": "Complete supplier view", "tone": "navy",
+            "note": "Complete supplier view", "tone": "matte-navy-deep",
         },
         {
             "id": "match", "label": "Matched orders", "value": f"{matched:,}",
-            "note": "Tracker and eBiz aligned", "tone": "navy-mid",
+            "note": "Tracker and eBiz aligned", "tone": "matte-crimson-deep",
         },
         {
             "id": "missing", "label": "Missing from eBiz", "value": f"{missing:,}",
-            "note": "Tracker orders not found", "tone": "red",
+            "note": "Tracker orders not found", "tone": "matte-navy-mid",
         },
         {
             "id": "mismatch", "label": "QTY mismatches", "value": f"{mismatches:,}",
-            "note": "Different shipped quantities", "tone": "red-mid",
+            "note": "Different shipped quantities", "tone": "matte-crimson-mid",
         },
         {
             "id": "ebiz_only", "label": "eBiz-only orders", "value": f"{len(ebiz_only):,}",
-            "note": "Not found in Tracker", "tone": "navy-soft",
+            "note": "Not found in Tracker", "tone": "matte-navy-soft",
         },
         {
             "id": "no_so", "label": "Rows without SO#", "value": f"{no_so:,}",
-            "note": "Tracker rows needing review", "tone": "red-soft",
+            "note": "Tracker rows needing review", "tone": "matte-crimson-soft",
         },
     ], "cross_reference", columns=6)
 
@@ -168,10 +170,13 @@ def reconciliation_view():
     )
     artifact = core.cache_get(con, artifact_key)
     if artifact is None:
-        artifact = reports.cross_reference_xlsx(con, supplier, xref)
-        core.cache_set(
-            con, artifact_key, "cross-reference-xlsx-v1", artifact, max_entries=12
-        )
+        with operation_status(
+            "Preparing Cross Reference workbook…", "Cross Reference workbook ready"
+        ):
+            artifact = reports.cross_reference_xlsx(con, supplier, xref)
+            core.cache_set(
+                con, artifact_key, "cross-reference-xlsx-v1", artifact, max_entries=12
+            )
     filename, data = artifact
     with st.container(horizontal=True, horizontal_alignment="right"):
         st.download_button(
@@ -182,6 +187,8 @@ def reconciliation_view():
             icon=":material/download:",
             key="cross_reference_download",
             width="content",
+            on_click=download_started,
+            args=(filename,),
         )
 
 
