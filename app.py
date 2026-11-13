@@ -3,7 +3,12 @@ import streamlit as st
 
 from web_ui import APP_NAME, FAVICON, PACD_LOGO, app_chrome
 
-st.set_page_config(page_title=APP_NAME, page_icon=FAVICON, layout="wide")
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon=FAVICON,
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 st.logo(PACD_LOGO, size="medium", icon_image=FAVICON)
 app_chrome()
 

@@ -47,7 +47,7 @@ def insert(con, kind, **values):
         con.execute(f"INSERT INTO {core.TABLES[kind]} ({cols}) VALUES ({marks})", list(values.values()))
 
 
-def test_shared_chrome_reserves_header_space_and_renders_floating_chip(monkeypatch):
+def test_shared_chrome_reserves_header_space_without_a_footer(monkeypatch):
     rendered = []
     monkeypatch.setattr(web_ui.st, "html", rendered.append)
 
@@ -58,11 +58,7 @@ def test_shared_chrome_reserves_header_space_and_renders_floating_chip(monkeypat
     assert '[data-testid="stHeader"]::after' in rendered[0]
     assert "data:image/png;base64" in rendered[0]
     assert "height: 68px" in web_ui.THEME
-    assert ".mc-footer-chip { position: fixed !important" in web_ui.THEME
-    assert "class='mc-footer-chip'" in rendered[1]
-    assert f"&copy; {date.today().year} PACD" in rendered[1]
-    assert "Developed by" in rendered[1]
-    assert "https://github.com/RecurSID" in rendered[1]
+    assert rendered[1] == "<div class='mc-topbrand-spacer' aria-hidden='true'></div>"
     assert "class='mc-topbrand'" not in rendered[1]
     assert "class='mc-topbrand'" not in rendered[2]
     assert "mc-header" in rendered[2]

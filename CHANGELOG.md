@@ -36,7 +36,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `app.py` is now the website router; feature UI is separated into page modules.
 - Dashboard spacing, KPI density and chart sizing were redesigned for a compact modern layout without overlapping graph content.
 - Dashboard filters now select fiscal year and packaging suppliers; all dashboard Summary values use the same aggregation source as the generated Summary Excel workbook. `assets/favicon.png` is the browser tab icon.
-- The fixed brand bar now includes an explicit responsive layout spacer, uses a larger Matalan logo, and cannot overlap dashboard content; the footer displays the current year and recurSID attribution dynamically.
+- The fixed brand bar now includes an explicit responsive layout spacer, uses a larger Matalan logo, and cannot overlap dashboard content.
 - The attribution is now a single compact chip fixed to the bottom-right of the viewport. It is rendered with the page header rather than as a footer section, reserves no document space, and page content scrolls behind it.
 - `run.bat` now creates a virtual environment and installs requirements automatically before launch.
 - Local and hosted report/database paths can be configured with `REPORTS_DIR` and `CARTON_DB`.
